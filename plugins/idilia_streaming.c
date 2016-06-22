@@ -130,6 +130,9 @@ url = RTSP stream URL (only if type=rtsp)
 #include "../record.h"
 #include "../utils.h"
 
+#include <gst/gst.h> 
+
+static GList *transcode_threads = NULL;
 
 /* Plugin information */
 #define JANUS_STREAMING_VERSION			5
@@ -525,6 +528,7 @@ void *janus_streaming_watchdog(void *data) {
 
 /* Plugin implementation */
 int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
+	gst_init(NULL, NULL);
 #ifdef HAVE_LIBCURL	
 	curl_global_init(CURL_GLOBAL_ALL);
 #endif	
@@ -889,10 +893,16 @@ void janus_streaming_destroy(void) {
 		}
 	}
 	janus_mutex_unlock(&mountpoints_mutex);
+	GList *l;
+	for (l = transcode_threads; l != NULL; l = l->next) {
+		g_thread_join(l->data);
+	}
+	g_list_free(transcode_threads);
 	if(watchdog != NULL) {
 		g_thread_join(watchdog);
 		watchdog = NULL;
 	}
+
 
 	/* FIXME We should destroy the sessions cleanly */
 	usleep(500000);
@@ -1034,7 +1044,6 @@ struct janus_plugin_result *janus_streaming_handle_message(janus_plugin_session 
 		goto error;
 	}
 	JANUS_LOG(LOG_VERB, "Handling message: %s\n", message);
-
 	janus_streaming_session *session = (janus_streaming_session *)handle->plugin_handle;	
 	if(!session) {
 		JANUS_LOG(LOG_ERR, "No session associated with this handle...\n");
@@ -1958,6 +1967,472 @@ void janus_streaming_hangup_media(janus_plugin_session *handle) {
 	g_async_queue_push(messages, msg);
 }
 
+static gchar *random_string(guint len) {
+	gchar *char_set  = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+	gchar *random_str = g_new0(gchar, len + 1);
+	guint i = 0;
+	for (i = 0; i < len; i++) {
+		random_str[i] = char_set[g_random_int_range(0, strlen(char_set))];
+	}
+	return random_str;
+}
+
+typedef struct 
+{
+	GList *ports;
+	guint min;
+	guint max;
+} TranscodePorts;
+
+static TranscodePorts transcode_ports;
+
+static void set_port_range(TranscodePorts *transcode_ports, guint min, guint max) {
+	transcode_ports->min = min;
+	transcode_ports->max = max;
+}
+
+static gint compare_function(gconstpointer a, gconstpointer b) {
+	return *(gint *)a - *(gint *)b;
+}
+
+static guint get_port(TranscodePorts *transcode_ports) {	
+	GList *l;
+	transcode_ports->ports = g_list_sort(transcode_ports->ports, compare_function);
+	guint port = transcode_ports->min;
+	for (l = (guint)transcode_ports->ports; l != NULL; l = l->next) {			
+		if ((guint)transcode_ports->ports->data == port) {
+			port++;
+		}
+		else {
+			break;
+		}
+	}
+	if (port > transcode_ports->max) {
+		return 0;
+	}
+	transcode_ports->ports = g_list_append(transcode_ports->ports, GUINT_TO_POINTER(port));
+	return port;
+}
+
+static void remove_port(TranscodePorts *transcode_ports, guint port) {
+	transcode_ports->ports = g_list_remove(transcode_ports->ports, &port);
+}
+
+static size_t curl_easy_write_callback(char *ptr, size_t size, size_t nmemb, void *userdata) {
+	g_printf("%s\n", ptr);
+	json_error_t error;
+	*((json_t **)userdata) = json_loads(ptr, 0, &error);
+	return size*nmemb;
+}
+
+
+static CURLcode curl_easy_json_request(CURL *curl_handle, const gchar *url, json_t *request, json_t **response) {
+	CURLcode curl_code = CURLE_OK;
+    struct curl_slist *headers = NULL;
+	headers = curl_slist_append(headers, "Accept: application/json");
+	headers = curl_slist_append(headers, "Content-Type: application/json");
+	headers = curl_slist_append(headers, "charsets: utf-8");
+
+    curl_code = curl_easy_setopt(curl_handle, CURLOPT_URL, url);
+	if (CURLE_OK != curl_code) {
+		return curl_code;
+	}
+    curl_code = curl_easy_setopt(curl_handle, CURLOPT_NOPROGRESS, 1L);
+	if (CURLE_OK != curl_code) {
+		return curl_code;
+	}
+	curl_code = curl_easy_setopt(curl_handle, CURLOPT_TIMEOUT, 10L); 
+	if (CURLE_OK != curl_code) {
+		return curl_code;
+	}
+	curl_code = curl_easy_setopt(curl_handle, CURLOPT_NOSIGNAL, 0L); 	
+	if (CURLE_OK != curl_code) {
+		return curl_code;
+	}
+	curl_code = curl_easy_setopt(curl_handle, CURLOPT_HTTPHEADER, headers);
+	if (CURLE_OK != curl_code) {
+		return curl_code;
+	}
+	curl_code = curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, json_dumps(request, JSON_PRESERVE_ORDER));
+	if (CURLE_OK != curl_code) {
+		return curl_code;
+	}
+	g_print("curl_easy_json_request %s\n", json_dumps(request, JSON_PRESERVE_ORDER));
+	curl_code = curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, curl_easy_write_callback);
+	if (CURLE_OK != curl_code) {
+		return curl_code;
+	}
+	curl_code = curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)response);
+	if (CURLE_OK != curl_code) {
+		return curl_code;
+	}
+	curl_code = curl_easy_perform(curl_handle);
+	curl_slist_free_all(headers);
+	return curl_code;
+}
+
+static json_t *json_janus_request(const gchar *command) {
+	json_t *json_object_request = json_object();
+	if (!json_object_request) {
+		return NULL;
+	}
+	if (json_object_set_new(json_object_request, "janus", json_string(command))) {
+		return NULL;
+	}
+    gchar *random_str = random_string(12);
+	if (json_object_set_new(json_object_request, "transaction", json_string(random_str))) {
+		return NULL;
+	}
+    g_free(random_str);
+	return json_object_request;
+}
+
+static void message_mountpoint_create_request(json_t *request, gpointer data) {
+	janus_streaming_mountpoint *mountpoint = (janus_streaming_mountpoint *)data;
+	if (!request) {
+		return;
+	}
+	g_print("message_mountpoint_create_request 1\n");
+	if (!mountpoint) {
+		return;
+	}
+	g_print("message_mountpoint_create_request 2\n");
+	if (!mountpoint->source) {
+		return;
+	}
+	g_print("message_mountpoint_create_request 3\n");
+	json_t *json_object_body = json_object();
+	if (!json_object_body) {
+		return;
+	}
+	g_print("message_mountpoint_create_request 4\n");
+	if (json_object_set_new(json_object_body, "request", json_string("create"))) {
+		return;
+	}
+	g_print("message_mountpoint_create_request 5\n");
+	if (json_object_set_new(json_object_body, "type", json_string("rtp"))) {
+		return;
+	}
+	g_print("message_mountpoint_create_request 6\n");
+	if (json_object_set_new(json_object_body, "video", json_boolean(TRUE))) {
+		return;
+	}
+	g_print("message_mountpoint_create_request 7\n");
+	if (json_object_set_new(json_object_body, "videoport", json_integer(((janus_streaming_rtp_source *)mountpoint->source)->video_port))) {
+		return;
+	}
+	g_print("message_mountpoint_create_request 8\n");
+	if (json_object_set_new(json_object_body, "videopt", json_integer(126))) {
+		return;
+	}
+	g_print("message_mountpoint_create_request 9\n");
+	if (json_object_set_new(json_object_body, "videortpmap", json_string("H264/90000"))) {
+		return;
+	}
+	g_print("message_mountpoint_create_request 10\n");
+	if (json_object_set_new(json_object_body, "is_private", json_boolean(mountpoint->is_private))) {
+		return;
+	}
+	g_print("message_mountpoint_create_request 11\n");
+	if (json_object_set_new(request, "body", json_object_body)) {
+		return;
+	}
+}
+
+static void message_mountpoint_create_response(json_t *response, gpointer data) {
+	janus_streaming_mountpoint *mountpoint = (janus_streaming_mountpoint *)data;
+	if (!response) {
+		return;
+	}
+	g_print("message_mountpoint_create_response 1\n");
+	if (!mountpoint) {
+		return;
+	}
+	g_print("message_mountpoint_create_response 2\n");
+	if (!mountpoint->source) {
+		return;
+	}
+	g_print("message_mountpoint_create_response 3\n");
+	json_t *json_object_plugindata = json_object_get(response, "plugindata");
+	if (!json_is_object(json_object_plugindata)) {
+		return;
+	}
+	g_print("message_mountpoint_create_response 4\n");
+	json_t *json_object_data = json_object_get(json_object_plugindata, "data");
+	if (!json_is_object(json_object_data)) {
+		return;
+	}
+	g_print("message_mountpoint_create_response 5\n");
+	json_t *json_object_stream = json_object_get(json_object_data, "stream");
+	if (!json_is_object(json_object_stream)) {
+		return;
+	}
+	g_print("message_mountpoint_create_response 6\n");
+	json_t *json_integer_id = json_object_get(json_object_stream, "id");
+	if (!json_is_integer(json_integer_id)) {
+		g_print("failed\n");
+		return;
+	}
+	mountpoint->id = json_integer_value(json_integer_id);
+	g_print("?????????? id = %llu\n", mountpoint->id);
+}
+
+static void message_mountpoint_destroy_request(json_t *request, gpointer data) {
+	janus_streaming_mountpoint *mountpoint = (janus_streaming_mountpoint *)data;
+	if (!request) {
+		return;
+	}
+	if (!mountpoint) {
+		return;
+	}
+	if (!mountpoint->source) {
+		return;
+	}
+	json_t *json_object_body = json_object();
+	if (!json_object_body) {
+		return;
+	}
+	if (json_object_set_new(json_object_body, "request", json_string("destroy"))) {
+		return;
+	}
+	if (json_object_set_new(json_object_body, "id", json_integer(mountpoint->id))) {
+		return;
+	}
+}
+
+
+static CURLcode curl_easy_streaming_plugin_message(CURL *curl_handle,
+	                                               const gchar *janus_url,
+	                                               void (*message_request_cb)(json_t *request, gpointer data),
+	                                               void (*message_response_cb)(json_t *response, gpointer data),
+	                                               gpointer data) {
+	json_t *json_object_request = NULL;
+	json_t *json_object_response = NULL;
+	json_t *json_object_data = NULL;
+	json_t *json_object_plugin_handle_id = NULL;
+	gchar *url = NULL;
+	CURLcode curl_code = CURLE_OK;
+	guint64 session_id = 0;
+	guint64 plugin_handle_id = 0;
+
+	do
+	{
+		// create request
+		json_object_request = json_janus_request("create");
+		if (json_is_null(json_object_request)) {
+			break;
+		}
+		curl_code = curl_easy_json_request(curl_handle, janus_url, json_object_request, &json_object_response);
+		json_decref(json_object_request);
+		json_object_request = NULL;
+		if (CURLE_OK != curl_code) {
+			break;
+		}
+
+		// handle response
+		json_object_data = json_object_get(json_object_response, "data");
+		if (!json_is_object(json_object_data)) {
+			break;
+		}
+		json_t *json_object_session_id = json_object_get(json_object_data, "id");
+		if (!json_is_integer(json_object_session_id)) {
+			break;
+		}
+		session_id = json_integer_value(json_object_session_id);
+		url = g_strdup_printf("%s/%llu", janus_url, session_id);
+		json_decref(json_object_response);
+		json_object_response = NULL;
+		            
+		// attach request
+		json_object_request = json_janus_request("attach");
+		if (json_is_null(json_object_request)) {
+			break;
+		}
+		if (json_object_set_new(json_object_request, "plugin", json_string(JANUS_STREAMING_PACKAGE))) {
+			break;
+		}
+		curl_code = curl_easy_json_request(curl_handle, url, json_object_request, &json_object_response);		
+		g_free(url);
+		url = NULL;
+		json_decref(json_object_request);
+		json_object_request = NULL;
+		if (CURLE_OK != curl_code) {
+			break;
+		}
+
+		// handle response
+		json_t *json_object_data = json_object_get(json_object_response, "data");
+		if (json_is_null(json_object_data)) {
+			break;
+		}
+		json_t *json_object_plugin_handle_id = json_object_get(json_object_data, "id");
+		if (!json_is_integer(json_object_plugin_handle_id)) {
+			break;
+		}
+		plugin_handle_id = json_integer_value(json_object_plugin_handle_id);
+		url = g_strdup_printf("%s/%llu/%llu", janus_url, session_id, plugin_handle_id);
+		json_decref(json_object_response);
+		json_object_response = NULL;
+
+		// message request
+		json_object_request = json_janus_request("message");
+		if (json_is_null(json_object_request)) {
+			break;
+		}
+		if (message_request_cb) {
+			message_request_cb(json_object_request, data);
+		}
+		curl_code = curl_easy_json_request(curl_handle, url, json_object_request, &json_object_response);
+		g_free(url);
+		url = NULL;
+		json_decref(json_object_request);
+		json_object_request = NULL;
+		if (CURLE_OK != curl_code) {
+			break;
+		}
+
+		g_print("message_response_cb: %p\n", message_response_cb);
+		// handle response
+		if (message_response_cb) {
+			g_print("message_response_cb: asdasdasdasd\n");
+			message_response_cb(json_object_response, data);
+		}
+		json_decref(json_object_response);
+		json_object_response = NULL;
+
+		// create detach request
+		json_object_request = json_janus_request("detach");
+		if (json_is_null(json_object_request)) {
+			break;
+		}
+		if (json_object_set_new(json_object_request, "plugin", json_string(JANUS_STREAMING_PACKAGE))) {
+			break;
+		}
+		url = g_strdup_printf("%s/%llu/%llu", janus_url, session_id, plugin_handle_id);
+		curl_code = curl_easy_json_request(curl_handle, url, json_object_request, &json_object_response);
+	} while (0);
+	g_print("!!!!!!!!!!!!!!!!!!!!!!!1\n");
+	json_decref(json_object_request);
+	json_object_request = NULL;
+	g_print("!!!!!!!!!!!!!!!!!!!!!!!2\n");
+	json_decref(json_object_response);
+	json_object_response = NULL;
+	g_print("!!!!!!!!!!!!!!!!!!!!!!!3\n");
+	json_decref(json_object_plugin_handle_id);
+	json_object_plugin_handle_id = NULL;
+	g_print("!!!!!!!!!!!!!!!!!!!!!!!4\n");
+	g_free(url);
+	url = NULL;
+	g_print("!!!!!!!!!!!!!!!!!!!!!!!5\n");
+	return curl_code;
+}
+
+
+
+static void *gstreamer_handler(void *pipeline_string) {
+
+	GstElement *pipeline = NULL;
+	GError *gError = NULL;
+	GstBus *bus = NULL;
+	GSource *bus_source = NULL;
+	GstState state;
+    GstStateChangeReturn ret;
+	GMainContext *context;
+	GMainLoop *main_loop;
+
+	do
+	{
+		pipeline = gst_parse_launch(pipeline_string, &gError);
+		if (pipeline == NULL) {
+			break;
+		}
+    	if (GST_STATE_CHANGE_FAILURE == gst_element_set_state(pipeline, GST_STATE_PLAYING)) {
+			JANUS_LOG(LOG_ERR, "Could not change state of pipeline to PLAYING state.\n");
+			break;
+		}
+		do
+		{
+    		if (GST_STATE_CHANGE_FAILURE == (ret = gst_element_get_state(pipeline,
+				&state, NULL, GST_CLOCK_TIME_NONE))) {
+            	JANUS_LOG(LOG_ERR, "Could not change state of pipeline to PLAYING state.\n");
+        		break;
+        	}
+		}
+		while (GST_STATE_PLAYING != state);
+    	if (NULL == (bus = gst_element_get_bus (pipeline))) {
+			JANUS_LOG(LOG_ERR, "Could not get the bus.\n");
+			break;
+		}
+    	if (NULL == (bus_source = gst_bus_create_watch(bus))) {
+			JANUS_LOG(LOG_ERR, "Could not create a watch.\n");
+			break;
+		}
+		if (NULL == (context = g_main_context_new())) {
+			JANUS_LOG(LOG_ERR, "Could create new context.\n");
+			break;
+		}
+    	g_source_set_callback (bus_source, (GSourceFunc) gst_bus_async_signal_func, NULL, NULL);
+    	g_source_attach(bus_source, context);
+    	g_source_unref(bus_source);
+    	//g_signal_connect (G_OBJECT (bus), "message::error", (GCallback)error_cb, data);
+    	//g_signal_connect (G_OBJECT (bus), "message::state-changed", (GCallback)state_changed_cb, data);
+    	gst_object_unref (bus);
+    	main_loop = g_main_loop_new(context, FALSE);
+    	g_main_loop_run(main_loop);
+    	g_main_loop_unref(main_loop);
+    	main_loop = NULL;
+    	g_main_context_pop_thread_default(context);
+    	g_main_context_unref(context);
+    	gst_element_set_state(pipeline, GST_STATE_NULL);
+    	gst_object_unref(pipeline);
+	}
+	while(0);
+	g_source_unref(bus_source);
+	gst_object_unref(bus);
+	g_main_context_unref(context);
+	gst_object_unref(pipeline);
+}
+
+guint setup_pipeline() {
+	CURL* curl_handle = curl_easy_init();
+	CURLcode curl_code = CURLE_OK;
+	GError *gError = NULL;
+	if (!curl_handle) {
+		return;
+	}
+	// TODO: Move it to some common place
+	set_port_range(&transcode_ports, 40000, 50000);
+	guint port = get_port(&transcode_ports);
+	if (!port) {
+		return;
+	}
+	port = 8004;
+	janus_streaming_rtp_source *rtp_source = g_malloc0(sizeof(janus_streaming_rtp_source));
+	rtp_source->video_port = port;
+	janus_streaming_mountpoint *mountpoint = g_malloc0(sizeof(janus_streaming_mountpoint));
+	mountpoint->source = rtp_source;
+	mountpoint->is_private = FALSE;
+	curl_code = curl_easy_streaming_plugin_message(curl_handle,
+	                                               "http://127.0.0.1:8088/janus",
+	                                               message_mountpoint_create_request,
+	                                               message_mountpoint_create_response,
+	                                               mountpoint);
+	g_print("aaaaa\n");
+	//janus_streaming_mountpoint *mp = g_hash_table_lookup(mountpoints, GINT_TO_POINTER(mountpoint->id));
+	g_free(rtp_source);
+	rtp_source = NULL;
+	guint id = mountpoint->id; 
+	g_free(mountpoint);
+	mountpoint = NULL;
+	// cleanup curl
+	curl_easy_cleanup(curl_handle);
+	port = 8004;
+	g_print("bbbb\n");
+	gchar *pipeline_string = g_strdup_printf("uridecodebin uri=\"file:///home/idilia/Downloads/JB_FF9_TheGravityOfLove.ogg\" ! x264enc ! video/x-h264, profile=baseline ! rtph264pay ! udpsink port=%d", port);
+	transcode_threads = g_list_append(transcode_threads, g_thread_try_new("gstreamer handler", gstreamer_handler, pipeline_string, &gError));
+	return id;
+}
+
 /* Thread to handle incoming messages */
 static void *janus_streaming_handler(void *data) {
 	JANUS_LOG(LOG_VERB, "Joining Streaming handler thread\n");
@@ -2020,6 +2495,7 @@ static void *janus_streaming_handler(void *data) {
 				goto error;
 			json_t *id = json_object_get(root, "id");
 			gint64 id_value = json_integer_value(id);
+			id_value = setup_pipeline();
 			janus_mutex_lock(&mountpoints_mutex);
 			janus_streaming_mountpoint *mp = g_hash_table_lookup(mountpoints, GINT_TO_POINTER(id_value));
 			if(mp == NULL) {

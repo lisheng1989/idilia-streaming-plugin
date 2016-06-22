@@ -74,16 +74,16 @@
 ; a H.264 mountpoint: you can feed it an x264enc+rtph264pay pipeline in
 ; gstreamer.
 ;
-[h264-sample]
-type = rtp
-id = 10
-description = H.264 live stream coming from gstreamer
-audio = no
-video = yes
-videoport = 8004
-videopt = 126
-videortpmap = H264/90000
-videofmtp = profile-level-id=42e01f\;packetization-mode=1
+;[h264-sample]
+;type = rtp
+;id = 10
+;description = H.264 live stream coming from gstreamer
+;audio = no
+;video = yes
+;videoport = 8004
+;videopt = 126
+;videortpmap = H264/90000
+;videofmtp = profile-level-id=42e01f\;packetization-mode=1
 
 ;
 ; This is a sample configuration for Opus/VP8 multicast streams
