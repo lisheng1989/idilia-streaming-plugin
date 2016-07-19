@@ -1328,8 +1328,8 @@ static void teardown_pipeline(janus_streaming_mountpoint *mountpoint) {
 	}
 	while(0);
 
-	// cleaup
-	if (!curl_handle) {
+	// cleanup
+	if (curl_handle) {
 		curl_easy_cleanup(curl_handle);
 		curl_handle = NULL;
 	}
