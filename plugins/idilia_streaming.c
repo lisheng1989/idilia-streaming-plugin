@@ -1271,16 +1271,16 @@ static void setup_pipeline(const gchar *id) {
 	}
 	while(0);
 
-	// cleaup
-	if (!curl_handle) {
+	// cleanup
+	if (curl_handle) {
 		curl_easy_cleanup(curl_handle);
 		curl_handle = NULL;
 	}
-	if (!rtp_source) {
+	if (rtp_source) {
 		g_free(rtp_source);
 		rtp_source = NULL;
 	}
-	if (!mountpoint) {
+	if (mountpoint) {
 		g_free(mountpoint);
 		mountpoint = NULL;
 	}
