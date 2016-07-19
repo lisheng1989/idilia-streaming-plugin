@@ -573,6 +573,7 @@ static size_t curl_easy_write_callback(char *ptr, size_t size, size_t nmemb, voi
 static CURLcode curl_easy_json_request(CURL *curl_handle, const gchar *url, json_t *request, json_t **response) {
 	
 	struct curl_slist *headers = NULL;
+	gchar *dumps = NULL;
 	CURLcode return_value = CURLE_OK;
 
 	do {
@@ -622,12 +623,13 @@ static CURLcode curl_easy_json_request(CURL *curl_handle, const gchar *url, json
 			JANUS_LOG(LOG_ERR, "Could not set CURLOPT_HTTPHEADER.\n");
 			break;
 		}
-		return_value = curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, json_dumps(request, JSON_PRESERVE_ORDER));
+		dumps = json_dumps(request, JSON_PRESERVE_ORDER);
+		JANUS_LOG(LOG_VERB, "curl_easy_json_request %s\n", dumps);
+		return_value = curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, dumps);		
 		if (CURLE_OK != return_value) {
 			JANUS_LOG(LOG_ERR, "Could not set CURLOPT_POSTFIELDS.\n");
 			break;
 		}
-		JANUS_LOG(LOG_VERB, "curl_easy_json_request %s\n", json_dumps(request, JSON_PRESERVE_ORDER));
 		return_value = curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, curl_easy_write_callback);
 		if (CURLE_OK != return_value) {
 			JANUS_LOG(LOG_ERR, "Could not set CURLOPT_WRITEFUNCTION.\n");
@@ -645,12 +647,17 @@ static CURLcode curl_easy_json_request(CURL *curl_handle, const gchar *url, json
 		}
 		curl_slist_free_all(headers);
 		headers = NULL;	
+		g_free(dumps);
+		dumps = NULL;
 	}
 	while(0);
 
 	// cleanup
 	if (headers) {
 		curl_slist_free_all(headers);
+	}	
+	if (dumps) {
+		g_free(dumps);
 	}
 
 	return return_value;
