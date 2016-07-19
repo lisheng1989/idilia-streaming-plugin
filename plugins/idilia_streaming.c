@@ -902,6 +902,7 @@ static gboolean message_mountpoint_destroy_request(json_t *request, gpointer dat
 	return return_value;
 }
 
+// TODO: Add error messages
 static CURLcode curl_easy_streaming_plugin_message(
 					CURL *curl_handle,
 					const gchar *janus_url,
@@ -1020,7 +1021,7 @@ static CURLcode curl_easy_streaming_plugin_message(
 		url = NULL;		
 	} while (0);
 
-	// cleaup
+	// cleanup
 	if (json_object_request) {	
 		json_decref(json_object_request);
 		json_object_request = NULL;
