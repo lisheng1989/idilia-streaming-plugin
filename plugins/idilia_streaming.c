@@ -1095,6 +1095,10 @@ static gpointer gstreamer_handler(gpointer data) {
 			}
 		}
 		while (GST_STATE_PLAYING != state);
+		if (GST_STATE_CHANGE_FAILURE == ret) {
+			JANUS_LOG(LOG_ERR, "Could not change state of pipeline to PLAYING state.\n");
+			break;
+		}
 		if (NULL == (bus = gst_element_get_bus (pipeline))) {
 			JANUS_LOG(LOG_ERR, "Could not get the bus.\n");
 			break;
@@ -1125,17 +1129,21 @@ static gpointer gstreamer_handler(gpointer data) {
 		g_main_loop_run(main_loop);
 		if (GST_STATE_CHANGE_FAILURE == gst_element_set_state(pipeline, GST_STATE_NULL)) {
 			JANUS_LOG(LOG_ERR, "Could not change state of pipeline to NULL state.\n");
-			break;
 		}
-		do
-		{
-			if (GST_STATE_CHANGE_FAILURE == (ret = gst_element_get_state(pipeline,
-				&state, NULL, GST_CLOCK_TIME_NONE))) {
-				JANUS_LOG(LOG_ERR, "Could not change state of pipeline to NULL state.\n");
-				break;
+		else { 
+			do
+			{
+				if (GST_STATE_CHANGE_FAILURE == (ret = gst_element_get_state(pipeline,
+					&state, NULL, GST_CLOCK_TIME_NONE))) {
+					JANUS_LOG(LOG_ERR, "Could not change state of pipeline to NULL state.\n");
+					break;
+				}
+			}
+			while (GST_STATE_NULL != state);
+			if (GST_STATE_CHANGE_FAILURE == ret) {
+				JANUS_LOG(LOG_ERR, "Could not change state of pipeline to PLAYING state.\n");
 			}
 		}
-		while (GST_STATE_NULL != state);
 		gst_object_unref(pipeline);
 		pipeline = NULL;
 		g_main_loop_unref(main_loop);
