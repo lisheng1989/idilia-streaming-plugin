@@ -1179,6 +1179,10 @@ static gpointer gstreamer_handler(gpointer data) {
 		pipeline = NULL;
 	}
 	if (pipeline_data) {
+		if (pipeline_data->id) {
+			g_free(pipeline_data->id);
+			pipeline_data->id = NULL;
+		}
 		if (pipeline_data->pipeline_string) {
 			g_free(pipeline_data->pipeline_string);
 			pipeline_data->pipeline_string = NULL;
@@ -1256,6 +1260,7 @@ static void setup_pipeline(const gchar *id) {
 			JANUS_LOG(LOG_ERR, "Failed to allocate pipeline data.\n");
 			break;
 		}
+		// allocation - deallocated within the thread
 		pipeline_data->id = g_strdup(id);
 		// allocation - deallocated within the thread
 		pipeline_data->pipeline_string = g_strdup_printf("uridecodebin uri=\"file:///home/idilia/Downloads/JB_FF9_TheGravityOfLove.ogg\" ! x264enc ! video/x-h264, profile=baseline ! rtph264pay ! udpsink port=%d", port);
