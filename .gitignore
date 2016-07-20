@@ -51,3 +51,6 @@ missing
 plugins/.deps/
 plugins/.dirstamp
 plugins/.libs/
+
+core
+.vscode/

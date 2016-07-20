@@ -655,9 +655,11 @@ static CURLcode curl_easy_json_request(CURL *curl_handle, const gchar *url, json
 	// cleanup
 	if (headers) {
 		curl_slist_free_all(headers);
+		headers = NULL;
 	}	
 	if (request_text) {
 		g_free(request_text);
+		request_text = NULL;
 	}
 
 	return return_value;
@@ -1285,11 +1287,11 @@ static void setup_pipeline(const gchar *id) {
 		curl_easy_cleanup(curl_handle);
 		curl_handle = NULL;
 	}
-	if (rtp_source) {
-		g_free(rtp_source);
-		rtp_source = NULL;
-	}
 	if (mountpoint) {
+		if (mountpoint->source) {
+			g_free(mountpoint->source);
+			mountpoint->source = NULL;
+		}
 		g_free(mountpoint);
 		mountpoint = NULL;
 	}
