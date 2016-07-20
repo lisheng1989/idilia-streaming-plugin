@@ -1125,8 +1125,10 @@ static gpointer gstreamer_handler(gpointer data) {
 		bus = NULL;
 		main_loop = g_main_loop_new(context, FALSE);
 		janus_mutex_lock(&transcode_main_loops_mutex);
-		g_hash_table_insert(transcode_main_loops, pipeline_data->id, main_loop);
+		g_hash_table_insert(transcode_main_loops, pipeline_data->id, main_loop);		
 		janus_mutex_unlock(&transcode_main_loops_mutex);		
+		g_free(pipeline_data->id);
+		pipeline_data->id = NULL;
 		g_free(pipeline_data);
 		pipeline_data = NULL;
 		g_main_loop_run(main_loop);
