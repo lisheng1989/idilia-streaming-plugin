@@ -472,6 +472,10 @@ static GHashTable *transcode_main_loops = NULL;
 janus_mutex transcode_threads_mutex;
 janus_mutex transcode_main_loops_mutex;
 
+static void transcode_main_loops_destroy(gpointer data) {
+	g_free(data);
+}
+
 static gchar *random_text(guint len, const gchar *char_set) {
 
 	gchar *random_str = g_new0(gchar, len + 1);
@@ -1125,10 +1129,8 @@ static gpointer gstreamer_handler(gpointer data) {
 		bus = NULL;
 		main_loop = g_main_loop_new(context, FALSE);
 		janus_mutex_lock(&transcode_main_loops_mutex);
-		g_hash_table_insert(transcode_main_loops, pipeline_data->id, main_loop);		
+		g_hash_table_insert(transcode_main_loops, pipeline_data->id, main_loop);
 		janus_mutex_unlock(&transcode_main_loops_mutex);		
-		g_free(pipeline_data->id);
-		pipeline_data->id = NULL;
 		g_free(pipeline_data);
 		pipeline_data = NULL;
 		g_main_loop_run(main_loop);
@@ -1181,10 +1183,6 @@ static gpointer gstreamer_handler(gpointer data) {
 		pipeline = NULL;
 	}
 	if (pipeline_data) {
-		if (pipeline_data->id) {
-			g_free(pipeline_data->id);
-			pipeline_data->id = NULL;
-		}
 		if (pipeline_data->pipeline_string) {
 			g_free(pipeline_data->pipeline_string);
 			pipeline_data->pipeline_string = NULL;
@@ -1446,7 +1444,7 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
 	
 	mountpoints = g_hash_table_new(g_str_hash, g_str_equal);
 	transcode_threads = g_hash_table_new(g_str_hash, g_str_equal);
-	transcode_main_loops = g_hash_table_new(g_str_hash, g_str_equal);
+	transcode_main_loops = g_hash_table_new_full(g_str_hash, g_str_equal, transcode_main_loops_destroy, NULL);
 	janus_mutex_init(&mountpoints_mutex);
 	janus_mutex_init(&transcode_threads_mutex);
 	janus_mutex_init(&transcode_main_loops_mutex);
@@ -1902,10 +1900,11 @@ void janus_streaming_destroy_session(janus_plugin_session *handle, int *error) {
 	JANUS_LOG(LOG_VERB, "Removing streaming session...\n");
 	if(session->mountpoint) {
 		janus_mutex_lock(&session->mountpoint->mutex);
+		guint old_listeners = g_list_length(session->mountpoint->listeners);
 		session->mountpoint->listeners = g_list_remove_all(session->mountpoint->listeners, session);
 		guint listeners = g_list_length(session->mountpoint->listeners); 
 		janus_mutex_unlock(&session->mountpoint->mutex);
-		if (!listeners) {
+		if (old_listeners && !listeners) {
 			teardown_pipeline(session->mountpoint);
 		}
 	}
@@ -3153,10 +3152,11 @@ static void *janus_streaming_handler(void *data) {
 				if(g_list_find(session->mountpoint->listeners, session) != NULL) {
 					JANUS_LOG(LOG_VERB, "  -- -- Found!\n");
 				}
+				guint old_listeners = g_list_length(session->mountpoint->listeners);
 				session->mountpoint->listeners = g_list_remove_all(session->mountpoint->listeners, session);
 				guint listeners = g_list_length(session->mountpoint->listeners);
 				janus_mutex_unlock(&session->mountpoint->mutex);
-				if (!listeners) {					
+				if (old_listeners && !listeners) {					
 					teardown_pipeline(session->mountpoint);
 				}
 			}
