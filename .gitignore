@@ -55,3 +55,5 @@ plugins/.libs/
 core
 .vscode/
 vgcore.*
+
+conf/idilia.plugin.streaming.cfg.sample

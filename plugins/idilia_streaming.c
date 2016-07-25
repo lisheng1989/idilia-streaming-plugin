@@ -574,7 +574,7 @@ static size_t curl_easy_write_callback(char *ptr, size_t size, size_t nmemb, voi
 	return size*nmemb;
 }
 
-static CURLcode curl_easy_json_request(CURL *curl_handle, const gchar *url, json_t *request, json_t **response) {
+static CURLcode curl_easy_post_json_request(CURL *curl_handle, const gchar *url, json_t *request, json_t **response) {
 	
 	struct curl_slist *headers = NULL;
 	gchar *request_text = NULL;
@@ -628,7 +628,7 @@ static CURLcode curl_easy_json_request(CURL *curl_handle, const gchar *url, json
 			break;
 		}
 		request_text = json_dumps(request, JSON_PRESERVE_ORDER);
-		JANUS_LOG(LOG_VERB, "curl_easy_json_request %s\n", request_text);
+		JANUS_LOG(LOG_VERB, "curl_easy_post_json_request %s\n", request_text);
 		return_value = curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, request_text);		
 		if (CURLE_OK != return_value) {
 			JANUS_LOG(LOG_ERR, "Could not set CURLOPT_POSTFIELDS.\n");
@@ -667,6 +667,115 @@ static CURLcode curl_easy_json_request(CURL *curl_handle, const gchar *url, json
 	}
 
 	return return_value;
+}
+
+static CURLcode curl_easy_get_json_request(CURL *curl_handle, const gchar *url, json_t **response) {
+
+	CURLcode return_value = CURLE_OK;
+
+	do {
+		return_value = curl_easy_setopt(curl_handle, CURLOPT_URL, url);
+		if (CURLE_OK != return_value) {
+			JANUS_LOG(LOG_ERR, "Could not set CURLOPT_URL.\n");
+			break;
+		}
+		return_value = curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, curl_easy_write_callback);
+		if (CURLE_OK != return_value) {
+			JANUS_LOG(LOG_ERR, "Could not set CURLOPT_WRITEFUNCTION.\n");
+			break;
+		}
+		return_value = curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)response);
+		if (CURLE_OK != return_value) {
+			JANUS_LOG(LOG_ERR, "Could not set CURLOPT_WRITEDATA.\n");
+			break;
+		}
+		return_value = curl_easy_perform(curl_handle);
+		if (CURLE_OK != return_value) {
+			JANUS_LOG(LOG_ERR, "Could not perform curl request.\n");
+			break;		
+		}
+	}
+	while(0);
+
+	return return_value;
+}
+
+static json_t *json_registry_source_request(const gchar *url) {
+
+	CURL *curl_handle = NULL;
+	json_t *json_object_response = NULL;
+	CURLcode return_value = CURLE_OK;
+
+	do
+	{
+		// allocation
+		curl_handle = curl_easy_init();
+		if (!curl_handle) {
+			JANUS_LOG(LOG_ERR, "Could not initialize curl.\n");
+			break;
+		}
+		return_value = curl_easy_get_json_request(curl_handle, url, &json_object_response);
+		if (CURLE_OK != return_value) {
+			JANUS_LOG(LOG_ERR, "Could not get registry.\n");
+			break;
+		}
+		curl_easy_cleanup(curl_handle);
+		curl_handle = NULL;
+	}
+	while(0);
+
+	if (curl_handle) {
+		curl_easy_cleanup(curl_handle);
+		curl_handle = NULL;
+	}
+
+	return json_object_response;
+}
+
+static gchar *get_source(const gchar *id) {
+
+	gchar *url = NULL;
+	json_t *json_source = NULL;
+	gchar *source = NULL;
+
+	do {
+		// allocation
+		url = g_strdup_printf("http://localhost:4000/api/cams/%s", id);
+		// allocation
+		json_source = json_registry_source_request(url);
+		g_free(url);
+		url = NULL;
+		if (!json_is_object(json_source)) {
+			JANUS_LOG(LOG_ERR, "Not valid json object.\n");
+			break;
+		}
+		json_t *json_id = json_object_get(json_source, "_id");
+		if (!json_is_string(json_id)) {
+			JANUS_LOG(LOG_ERR, "_id is not a string.\n");
+			break;
+		}
+		// TODO: Change Source to uri
+		json_t *json_uri = json_object_get(json_source, "Source");
+		if (!json_is_string(json_uri)) {
+			JANUS_LOG(LOG_ERR, "uri is not a string.\n");
+			break;
+		}
+		// allocation
+		source = g_strdup(json_string_value(json_uri));
+		json_decref(json_source);
+		json_source = NULL;
+	}
+	while(0);
+
+	if (url) {
+		g_free(url);
+		url = NULL;
+	}
+	if (json_source) {
+		json_decref(json_source);
+		json_source = NULL;
+	}
+	return source;
 }
 
 static json_t *json_janus_request(const gchar *command) {
@@ -764,7 +873,7 @@ static gboolean message_mountpoint_create_request(json_t *request, gpointer data
 			break;
 		}
 		if (json_object_set_new(json_object_body, "videoport",
-		    json_integer(((janus_streaming_rtp_source *)mountpoint->source)->video_port))) {
+			json_integer(((janus_streaming_rtp_source *)mountpoint->source)->video_port))) {
 			JANUS_LOG(LOG_ERR, "Could not set videoport json integer.\n");
 			return_value = FALSE;
 			break;
@@ -775,13 +884,13 @@ static gboolean message_mountpoint_create_request(json_t *request, gpointer data
 			break;
 		}
 		if (json_object_set_new(json_object_body, "videortpmap",
-		    json_string("H264/90000"))) {
+			json_string("H264/90000"))) {
 			JANUS_LOG(LOG_ERR, "Could not set videortpmap json string.\n");
 			return_value = FALSE;
 			break;
 		}
 		if (json_object_set_new(json_object_body, "is_private",
-		    json_boolean(mountpoint->is_private))) {
+			json_boolean(mountpoint->is_private))) {
 			JANUS_LOG(LOG_ERR, "Could not set is_private json boolean.\n");
 			return_value = FALSE;
 			break;
@@ -908,13 +1017,10 @@ static gboolean message_mountpoint_destroy_request(json_t *request, gpointer dat
 	return return_value;
 }
 
-// TODO: Add error messages
-static CURLcode curl_easy_streaming_plugin_message(
-					CURL *curl_handle,
-					const gchar *janus_url,
-					gboolean (*message_request_cb)(json_t *request, gpointer data),
-					gboolean (*message_response_cb)(json_t *response, gpointer data),
-					gpointer data) {
+static CURLcode curl_easy_streaming_plugin_message(CURL *curl_handle, const gchar *janus_url,
+													gboolean (*message_request_cb)(json_t *request, gpointer data),
+													gboolean (*message_response_cb)(json_t *response, gpointer data),
+													gpointer data) {
 
 	json_t *json_object_request = NULL;
 	json_t *json_object_response = NULL;
@@ -931,22 +1037,26 @@ static CURLcode curl_easy_streaming_plugin_message(
 		// create request
 		json_object_request = json_janus_request("create");
 		if (!json_object_request) {
+			JANUS_LOG(LOG_ERR, "Could not initiate create janus request.\n");
 			break;
 		}
-		return_value = curl_easy_json_request(curl_handle, janus_url, json_object_request, &json_object_response);
+		return_value = curl_easy_post_json_request(curl_handle, janus_url, json_object_request, &json_object_response);
 		json_decref(json_object_request);
 		json_object_request = NULL;
 		if (CURLE_OK != return_value) {
+			JANUS_LOG(LOG_ERR, "Failed to post json request (error=%u).\n", return_value);
 			break;
 		}
 
 		// handle response
 		json_object_data = json_object_get(json_object_response, "data");
 		if (!json_is_object(json_object_data)) {
+			JANUS_LOG(LOG_ERR, "Could not get data json object from the response.\n");
 			break;
 		}
 		json_t *json_object_session_id = json_object_get(json_object_data, "id");
 		if (!json_is_integer(json_object_session_id)) {
+			JANUS_LOG(LOG_ERR, "Could not get integer session id from the data.\n");
 			break;
 		}
 		session_id = json_integer_value(json_object_session_id);
@@ -955,31 +1065,36 @@ static CURLcode curl_easy_streaming_plugin_message(
 		json_decref(json_object_response);
 		json_object_response = NULL;
 
-		// allocation      
+		// allocation
 		// attach request
 		json_object_request = json_janus_request("attach");
 		if (!json_object_request) {
+			JANUS_LOG(LOG_ERR, "Could not initiate attach janus request.\n");
 			break;
 		}
 		if (json_object_set_new(json_object_request, "plugin", json_string(JANUS_STREAMING_PACKAGE))) {
+			JANUS_LOG(LOG_ERR, "Could not set object plugin with json string in the json request.\n");
 			break;
 		}
-		return_value = curl_easy_json_request(curl_handle, url, json_object_request, &json_object_response);		
+		return_value = curl_easy_post_json_request(curl_handle, url, json_object_request, &json_object_response);		
 		g_free(url);
 		url = NULL;
 		json_decref(json_object_request);
 		json_object_request = NULL;
 		if (CURLE_OK != return_value) {
+			JANUS_LOG(LOG_ERR, "Failed to post json request (error=%u).\n", return_value);
 			break;
 		}
 
 		// handle response
 		json_object_data = json_object_get(json_object_response, "data");
-		if (json_is_null(json_object_data)) {
+		if (!json_is_object(json_object_data)) {
+			JANUS_LOG(LOG_ERR, "Could not get data json object from the response.\n");
 			break;
 		}
 		json_t *json_object_plugin_handle_id = json_object_get(json_object_data, "id");
 		if (!json_is_integer(json_object_plugin_handle_id)) {
+			JANUS_LOG(LOG_ERR, "Could not get integer session id from the data.\n");
 			break;
 		}
 		plugin_handle_id = json_integer_value(json_object_plugin_handle_id);
@@ -992,22 +1107,30 @@ static CURLcode curl_easy_streaming_plugin_message(
 		// message request
 		json_object_request = json_janus_request("message");
 		if (!json_object_request) {
+			JANUS_LOG(LOG_ERR, "Could not initiate message janus request.\n");
 			break;
 		}
 		if (message_request_cb) {
-			message_request_cb(json_object_request, data);
+			if (!message_request_cb(json_object_request, data)) {
+				JANUS_LOG(LOG_ERR, "Could not send janus request.\n");
+				break;
+			}
 		}
-		return_value = curl_easy_json_request(curl_handle, url, json_object_request, &json_object_response);
+		return_value = curl_easy_post_json_request(curl_handle, url, json_object_request, &json_object_response);
 		g_free(url);
 		url = NULL;
 		json_decref(json_object_request);
 		json_object_request = NULL;
 		if (CURLE_OK != return_value) {		
+			JANUS_LOG(LOG_ERR, "Failed to post json request (error=%u).\n", return_value);
 			break;
 		}
 		// handle response
 		if (message_response_cb) {
-			message_response_cb(json_object_response, data);
+			if (!message_response_cb(json_object_response, data)) {
+				JANUS_LOG(LOG_ERR, "Could not handle janus response.\n");
+				break;
+			}
 		}
 		json_decref(json_object_response);
 		json_object_response = NULL;
@@ -1015,16 +1138,22 @@ static CURLcode curl_easy_streaming_plugin_message(
 		// create detach request
 		json_object_request = json_janus_request("detach");
 		if (!json_object_request) {
+			JANUS_LOG(LOG_ERR, "Could not initiate dettach janus request.\n");
 			break;
 		}
 		if (json_object_set_new(json_object_request, "plugin", json_string(JANUS_STREAMING_PACKAGE))) {
+			JANUS_LOG(LOG_ERR, "Could not set object plugin with json string in the json request.\n");
 			break;
 		}
 		// allocation
 		url = g_strdup_printf("%s/%"SCNu64"/%"SCNu64, janus_url, session_id, plugin_handle_id);
-		return_value = curl_easy_json_request(curl_handle, url, json_object_request, &json_object_response);
+		return_value = curl_easy_post_json_request(curl_handle, url, json_object_request, &json_object_response);
 		g_free(url);
 		url = NULL;		
+		if (CURLE_OK != return_value) {		
+			JANUS_LOG(LOG_ERR, "Failed to post json request (error=%u).\n", return_value);
+			break;
+		}
 	} while (0);
 
 	// cleanup
@@ -1055,6 +1184,7 @@ typedef struct {
 
 } pipeline_data_t;
 
+// TODO error handling
 static gpointer gstreamer_handler(gpointer data) {
 
 	GstElement *pipeline = NULL;	
@@ -1103,7 +1233,6 @@ static gpointer gstreamer_handler(gpointer data) {
 		}
 		while (GST_STATE_PLAYING != state);
 		if (GST_STATE_CHANGE_FAILURE == ret) {
-			JANUS_LOG(LOG_ERR, "Could not change state of pipeline to PLAYING state.\n");
 			break;
 		}
 		if (NULL == (bus = gst_element_get_bus (pipeline))) {
@@ -1147,9 +1276,6 @@ static gpointer gstreamer_handler(gpointer data) {
 				}
 			}
 			while (GST_STATE_NULL != state);
-			if (GST_STATE_CHANGE_FAILURE == ret) {
-				JANUS_LOG(LOG_ERR, "Could not change state of pipeline to PLAYING state.\n");
-			}
 		}
 		gst_object_unref(pipeline);
 		pipeline = NULL;
@@ -1199,11 +1325,17 @@ static void setup_pipeline(const gchar *id) {
 	CURL *curl_handle = NULL; 
 	janus_streaming_rtp_source *rtp_source = NULL;
 	janus_streaming_mountpoint *mountpoint = NULL;
+	gchar *source = NULL;
 
 	do {
-		// TODO: Take the range from the configuration file
-		set_port_range(&transcode_ports, 40000, 50000);
+		// allocation
+		source = get_source(id);
+		if (!source) {
+			JANUS_LOG(LOG_ERR, "Could not get source.\n");
+			break;
+		}
 
+		// allocation
 		guint port = get_port(&transcode_ports);
 		if (!port) {
 			JANUS_LOG(LOG_ERR, "Could not allocate port.\n");
@@ -1233,11 +1365,8 @@ static void setup_pipeline(const gchar *id) {
 		mountpoint->id = g_strdup(id);
 		mountpoint->is_private = FALSE;
 
-		CURLcode curl_code = curl_easy_streaming_plugin_message(curl_handle,
-																"http://127.0.0.1:8088/janus",
-																message_mountpoint_create_request,
-																message_mountpoint_create_response,
-																mountpoint);
+		CURLcode curl_code = curl_easy_streaming_plugin_message(curl_handle, "http://127.0.0.1:8088/janus", message_mountpoint_create_request,
+																message_mountpoint_create_response, mountpoint);
 
 		g_free(mountpoint->id);
 		mountpoint->id = NULL;
@@ -1250,26 +1379,31 @@ static void setup_pipeline(const gchar *id) {
 		curl_handle = NULL;
 
 		if (CURLE_OK != curl_code) {
-			JANUS_LOG(LOG_ERR, "Failed to create mountpoint.\n");
+			JANUS_LOG(LOG_ERR, "Could not create mountpoint.\n");
 			break;
 		}
 
 		// allocation - deallocated within the thread
 		pipeline_data_t *pipeline_data = g_new0(pipeline_data_t, 1);
 		if (!pipeline_data) {
-			JANUS_LOG(LOG_ERR, "Failed to allocate pipeline data.\n");
+			JANUS_LOG(LOG_ERR, "Could not allocate pipeline data.\n");
 			break;
 		}
-		// allocation - deallocated within the thread
+		// allocation - deallocated when removing form the transcode_main_loops hash table
 		pipeline_data->id = g_strdup(id);
 		// allocation - deallocated within the thread
-		pipeline_data->pipeline_string = g_strdup_printf("uridecodebin uri=\"file:///home/idilia/Downloads/JB_FF9_TheGravityOfLove.ogg\" ! x264enc ! video/x-h264, profile=baseline ! rtph264pay ! udpsink port=%d", port);
+		pipeline_data->pipeline_string = g_strdup_printf(
+														"uridecodebin uri=\"%s\" ! x264enc ! video/x-h264, profile=baseline ! rtph264pay ! udpsink port=%d",
+														source, port);
+		g_free(source);
+		source = NULL;
 		GError *error = NULL;
 		// allocation
 		GThread *thread_handler = g_thread_try_new("gstreamer handler", gstreamer_handler, pipeline_data, &error);
 		if (!thread_handler) {
 			if (error) {
-				JANUS_LOG(LOG_ERR, "Got error %d (%s) trying to launch the gstreamer handler thread...\n", error->code, error->message ? error->message : "??");
+				JANUS_LOG(LOG_ERR, "Got error %d (%s) trying to launch the gstreamer handler thread...\n", error->code,
+				 		error->message ? error->message : "??");
 			} else {
 				JANUS_LOG(LOG_ERR, "Failed to start gstreamer handler...\n");
 			}
@@ -1288,6 +1422,10 @@ static void setup_pipeline(const gchar *id) {
 	while(0);
 
 	// cleanup
+	if (source) {
+		g_free(source);
+		source = NULL;
+	}
 	if (curl_handle) {
 		curl_easy_cleanup(curl_handle);
 		curl_handle = NULL;
@@ -1300,6 +1438,7 @@ static void setup_pipeline(const gchar *id) {
 		g_free(mountpoint);
 		mountpoint = NULL;
 	}
+
 }
 
 static void teardown_pipeline(janus_streaming_mountpoint *mountpoint) {
@@ -1311,7 +1450,7 @@ static void teardown_pipeline(janus_streaming_mountpoint *mountpoint) {
 			JANUS_LOG(LOG_ERR, "Input parameter mountpoint was null.\n");
 			break;
 		}
-		janus_mutex_lock(&transcode_main_loops_mutex);
+		janus_mutex_lock(&transcode_main_loops_mutex);		
 		GMainLoop *main_loop = g_hash_table_lookup(transcode_main_loops, mountpoint->id);
 		if (!main_loop) {
 			JANUS_LOG(LOG_ERR, "Could not find mountpoint.\n");
@@ -1329,11 +1468,8 @@ static void teardown_pipeline(janus_streaming_mountpoint *mountpoint) {
 			JANUS_LOG(LOG_ERR, "Could not initialize curl.\n");
 		}
 		else {
-			CURLcode  curl_code = curl_easy_streaming_plugin_message(curl_handle,
-																	"http://127.0.0.1:8088/janus",
-																	message_mountpoint_destroy_request,
-																	NULL,
-																	mountpoint);																
+			CURLcode  curl_code = curl_easy_streaming_plugin_message(curl_handle, "http://127.0.0.1:8088/janus", message_mountpoint_destroy_request,
+																	NULL, mountpoint);
 			if (CURLE_OK != curl_code) {
 				JANUS_LOG(LOG_ERR, "Failed to destroy mountpoint.\n");
 			}
@@ -1457,6 +1593,33 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
 			if(cat->name == NULL) {
 				cl = cl->next;
 				continue;
+			}
+			uint16_t rtp_min_port = 0, rtp_max_port = 0;
+			janus_config_item *item = janus_config_get_item_drilldown(config, "media", "rtp_port_range");
+			if(item && item->value) {
+				/* Split in min and max port */
+				char *maxport = strrchr(item->value, '-');
+				if(maxport != NULL) {
+					*maxport = '\0';
+					maxport++;
+					rtp_min_port = atoi(item->value);
+					rtp_max_port = atoi(maxport);
+					maxport--;
+					*maxport = '-';
+				}
+				if(rtp_min_port > rtp_max_port) {
+					int temp_port = rtp_min_port;
+					rtp_min_port = rtp_max_port;
+					rtp_max_port = temp_port;
+				}
+				if(rtp_max_port == 0)
+					rtp_max_port = 65535;
+				JANUS_LOG(LOG_INFO, "RTP port range: %u -- %u\n", rtp_min_port, rtp_max_port);
+			}
+			if (!set_port_range(&transcode_ports, rtp_min_port, rtp_max_port)) {
+					set_port_range(&transcode_ports, 40001, 50000);
+					cl = cl->next;
+					continue;
 			}
 			JANUS_LOG(LOG_VERB, "Adding stream '%s'\n", cat->name);
 			janus_config_item *type = janus_config_get_item(cat, "type");
@@ -1811,7 +1974,7 @@ void janus_streaming_destroy(void) {
 	if(watchdog != NULL) {
 		g_thread_join(watchdog);
 		watchdog = NULL;
-	}	
+	}
 
 	/* FIXME We should destroy the sessions cleanly */
 	usleep(500000);
@@ -2943,7 +3106,7 @@ static void *janus_streaming_handler(void *data) {
 			if(error_code != 0)
 				goto error;
 			json_t *id = json_object_get(root, "id");
-			const gchar *id_value = json_string_value(id);			
+			const gchar *id_value = json_string_value(id);
 			janus_mutex_lock(&mountpoints_mutex);
 			janus_streaming_mountpoint *mp = g_hash_table_lookup(mountpoints, id_value);
 			if(mp == NULL) {
@@ -3156,7 +3319,7 @@ static void *janus_streaming_handler(void *data) {
 				session->mountpoint->listeners = g_list_remove_all(session->mountpoint->listeners, session);
 				guint listeners = g_list_length(session->mountpoint->listeners);
 				janus_mutex_unlock(&session->mountpoint->mutex);
-				if (old_listeners && !listeners) {					
+				if (old_listeners && !listeners) {
 					teardown_pipeline(session->mountpoint);
 				}
 			}

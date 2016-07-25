@@ -37,6 +37,9 @@
 ; automatically downloads a couple of files (radio.alaw, music.mulaw)
 ; to the plugins/streams folder. 
 ;
+[general]
+rtp_port_range = 40001-50000
+
 ;[gstreamer-sample]
 ;type = rtp
 ;id = 1
