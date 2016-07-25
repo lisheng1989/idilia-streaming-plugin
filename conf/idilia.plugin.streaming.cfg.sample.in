@@ -1,3 +1,7 @@
+; [general]
+; rtp_port_range = range of ports used for communication with streams
+; janus_endpoint = location of janus endpoint
+; registry_endpoint = location of remote registry
 ; [stream-name]
 ; type = rtp|live|ondemand|rtsp
 ;        rtp = stream originated by an external tool (e.g., gstreamer or
@@ -8,7 +12,7 @@
 ;                   (multiple listeners = different streaming contexts)
 ;        rtsp = stream originated by an external RTSP feed (only
 ;               available if libcurl support was compiled)
-; id = <unique numeric ID> (if missing, a random one will be generated)
+; id = <unique string ID> (if missing, a random one will be generated)
 ; description = This is my awesome stream
 ; is_private = yes|no (private streams don't appear when you do a 'list'
 ;			request)
@@ -39,10 +43,17 @@
 ;
 [general]
 rtp_port_range = 40001-50000
+janus_endpoint = http://localhost:8088/janus
+;registry_endpoint = http://localhost:4000/api/cams
+
+[gstreamer-source-sample]
+type = source
+id = 5784bfd27f5073aa159400a4
+uri = rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mov
 
 ;[gstreamer-sample]
 ;type = rtp
-;id = 1
+;id = c8576a6246aa44a39f281e6b
 ;description = Opus/VP8 live stream coming from gstreamer
 ;audio = yes
 ;video = yes
@@ -55,7 +66,7 @@ rtp_port_range = 40001-50000
 ;
 ;[file-live-sample]
 ;type = live
-;id = 2
+;id = 6dcb2aa2891f4c53bbfe5bc2
 ;description = a-law file source (radio broadcast)
 ;filename = @streamdir@/radio.alaw		; See install.sh
 ;audio = yes
@@ -64,7 +75,7 @@ rtp_port_range = 40001-50000
 ;
 ;[file-ondemand-sample]
 ;type = ondemand
-;id = 3
+;id = c15366909ddc4a1aaaf38c37
 ;description = mu-law file source (music)
 ;filename = @streamdir@/music.mulaw	; See install.sh
 ;audio = yes
@@ -79,7 +90,7 @@ rtp_port_range = 40001-50000
 ;
 ;[h264-sample]
 ;type = rtp
-;id = 10
+;id = 07446aea726e497286ca11b8
 ;description = H.264 live stream coming from gstreamer
 ;audio = no
 ;video = yes
@@ -93,7 +104,7 @@ rtp_port_range = 40001-50000
 ;
 ;[gstreamer-multicast]
 ;type = rtp
-;id = 20
+;id = e170e802cc3f4b8da8c43ebd
 ;description = Opus/VP8 live multicast stream coming from gstreamer 
 ;audio = yes
 ;video = yes
@@ -113,7 +124,7 @@ rtp_port_range = 40001-50000
 ;
 ;[rtsp-test]
 ;type = rtsp
-;id = 99
+;id = 912906c1f9384a4a8c4ddab1
 ;description = RTSP Test
 ;audio = no
 ;video = yes

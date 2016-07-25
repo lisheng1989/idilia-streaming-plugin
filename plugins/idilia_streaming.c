@@ -458,6 +458,9 @@ typedef struct janus_streaming_rtp_relay_packet {
 #define JANUS_STREAMING_ERROR_CANT_SWITCH			458
 #define JANUS_STREAMING_ERROR_UNKNOWN_ERROR			470
 
+static const gchar *janus_endpoint = NULL;
+static const gchar *registry_endpoint = NULL;
+
 typedef struct {
 	GList *ports;
 	guint min;
@@ -468,11 +471,13 @@ typedef struct {
 static transcode_ports_t transcode_ports;
 static GHashTable *transcode_threads = NULL;
 static GHashTable *transcode_main_loops = NULL;
+static GHashTable *transcode_sources = NULL;
 
 janus_mutex transcode_threads_mutex;
 janus_mutex transcode_main_loops_mutex;
+janus_mutex transcode_sources_mutex;
 
-static void transcode_main_loops_destroy(gpointer data) {
+static void g_str_destroy(gpointer data) {
 	g_free(data);
 }
 
@@ -495,9 +500,9 @@ static gchar *random_string(guint len) {
 
 }
 
-static gchar *random_guid(void) {
+static gchar *random_id(void) {
 
-	return random_text(32, "abcdefghijklmnopqrstuvwxyz0123456789");
+	return random_text(24, "abcdefghijklmnopqrstuvwxyz0123456789");
 
 }
 
@@ -561,9 +566,10 @@ static void remove_ports(transcode_ports_t *transcode_ports) {
 
 	janus_mutex_lock(&(transcode_ports->mutex));
 	g_list_free(transcode_ports->ports);
+	transcode_ports->ports = NULL;
 	janus_mutex_unlock(&(transcode_ports->mutex));
 
-}
+} 
 
 static size_t curl_easy_write_callback(char *ptr, size_t size, size_t nmemb, void *userdata) {
 
@@ -732,15 +738,19 @@ static json_t *json_registry_source_request(const gchar *url) {
 	return json_object_response;
 }
 
-static gchar *get_source(const gchar *id) {
+static gchar *get_source_from_registry_by_id(const gchar *registry_url, const gchar *id) {
 
 	gchar *url = NULL;
 	json_t *json_source = NULL;
 	gchar *source = NULL;
 
 	do {
+		if (!registry_url) {
+			JANUS_LOG(LOG_ERR, "Registry url not specified.\n");
+			break;
+		}
 		// allocation
-		url = g_strdup_printf("http://localhost:4000/api/cams/%s", id);
+		url = g_strdup_printf("%s/%s", registry_url, id);
 		// allocation
 		json_source = json_registry_source_request(url);
 		g_free(url);
@@ -776,6 +786,20 @@ static gchar *get_source(const gchar *id) {
 		json_source = NULL;
 	}
 	return source;
+}
+
+static gchar *get_source_from_local_registry_by_id(const gchar *id) {
+	
+	gchar *source = NULL;
+	janus_mutex_lock(&transcode_sources_mutex);
+	source = g_hash_table_lookup(transcode_sources, id);
+	if (source) {
+		// allocation
+		source = g_strdup(source);
+	}
+	janus_mutex_unlock(&transcode_sources_mutex);
+	return source;
+
 }
 
 static json_t *json_janus_request(const gchar *command) {
@@ -1185,7 +1209,7 @@ typedef struct {
 } pipeline_data_t;
 
 // TODO error handling
-static gpointer gstreamer_handler(gpointer data) {
+static gpointer transcode_handler(gpointer data) {
 
 	GstElement *pipeline = NULL;	
 	GstBus *bus = NULL;
@@ -1328,8 +1352,15 @@ static void setup_pipeline(const gchar *id) {
 	gchar *source = NULL;
 
 	do {
-		// allocation
-		source = get_source(id);
+		if (!registry_endpoint) {
+			JANUS_LOG(LOG_WARN, "Registry endpoint not specified. Trying local registry.\n");
+			// allocation
+			source = get_source_from_local_registry_by_id(id);
+		}
+		else {
+			// allocation
+			source = get_source_from_registry_by_id(registry_endpoint, id);
+		}
 		if (!source) {
 			JANUS_LOG(LOG_ERR, "Could not get source.\n");
 			break;
@@ -1365,7 +1396,7 @@ static void setup_pipeline(const gchar *id) {
 		mountpoint->id = g_strdup(id);
 		mountpoint->is_private = FALSE;
 
-		CURLcode curl_code = curl_easy_streaming_plugin_message(curl_handle, "http://127.0.0.1:8088/janus", message_mountpoint_create_request,
+		CURLcode curl_code = curl_easy_streaming_plugin_message(curl_handle, janus_endpoint, message_mountpoint_create_request,
 																message_mountpoint_create_response, mountpoint);
 
 		g_free(mountpoint->id);
@@ -1399,13 +1430,13 @@ static void setup_pipeline(const gchar *id) {
 		source = NULL;
 		GError *error = NULL;
 		// allocation
-		GThread *thread_handler = g_thread_try_new("gstreamer handler", gstreamer_handler, pipeline_data, &error);
+		GThread *thread_handler = g_thread_try_new("transcode handler", transcode_handler, pipeline_data, &error);
 		if (!thread_handler) {
 			if (error) {
-				JANUS_LOG(LOG_ERR, "Got error %d (%s) trying to launch the gstreamer handler thread...\n", error->code,
+				JANUS_LOG(LOG_ERR, "Got error %d (%s) trying to launch the transcode handler thread...\n", error->code,
 				 		error->message ? error->message : "??");
 			} else {
-				JANUS_LOG(LOG_ERR, "Failed to start gstreamer handler...\n");
+				JANUS_LOG(LOG_ERR, "Failed to start transcode handler...\n");
 			}
 			g_free(pipeline_data->id);
 			pipeline_data->id = NULL;
@@ -1468,7 +1499,7 @@ static void teardown_pipeline(janus_streaming_mountpoint *mountpoint) {
 			JANUS_LOG(LOG_ERR, "Could not initialize curl.\n");
 		}
 		else {
-			CURLcode  curl_code = curl_easy_streaming_plugin_message(curl_handle, "http://127.0.0.1:8088/janus", message_mountpoint_destroy_request,
+			CURLcode  curl_code = curl_easy_streaming_plugin_message(curl_handle, janus_endpoint, message_mountpoint_destroy_request,
 																	NULL, mountpoint);
 			if (CURLE_OK != curl_code) {
 				JANUS_LOG(LOG_ERR, "Failed to destroy mountpoint.\n");
@@ -1580,46 +1611,65 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
 	
 	mountpoints = g_hash_table_new(g_str_hash, g_str_equal);
 	transcode_threads = g_hash_table_new(g_str_hash, g_str_equal);
-	transcode_main_loops = g_hash_table_new_full(g_str_hash, g_str_equal, transcode_main_loops_destroy, NULL);
+	transcode_main_loops = g_hash_table_new_full(g_str_hash, g_str_equal, g_str_destroy, NULL);
+	transcode_sources = g_hash_table_new_full(g_str_hash, g_str_equal, g_str_destroy, g_str_destroy);
 	janus_mutex_init(&mountpoints_mutex);
 	janus_mutex_init(&transcode_threads_mutex);
 	janus_mutex_init(&transcode_main_loops_mutex);
+	janus_mutex_init(&transcode_sources_mutex);	
 	janus_mutex_init(&(transcode_ports.mutex));
 	/* Parse configuration to populate the mountpoints */
 	if(config != NULL) {
+		uint16_t rtp_min_port = 0;
+		uint16_t rtp_max_port = 0;
+		gboolean next = FALSE;
+		janus_config_item *item = janus_config_get_item_drilldown(config, "general", "rtp_port_range");
+		if(item && item->value) {
+			next = TRUE;
+			/* Split in min and max port */
+			char *maxport = strrchr(item->value, '-');
+			if(maxport != NULL) {
+				*maxport = '\0';
+				maxport++;
+				rtp_min_port = atoi(item->value);
+				rtp_max_port = atoi(maxport);
+				maxport--;
+				*maxport = '-';
+			}
+			if(rtp_min_port > rtp_max_port) {
+				int temp_port = rtp_min_port;
+				rtp_min_port = rtp_max_port;
+				rtp_max_port = temp_port;
+			}
+			if(rtp_max_port == 0)
+				rtp_max_port = 65535;
+			JANUS_LOG(LOG_INFO, "RTP port range: %u -- %u\n", rtp_min_port, rtp_max_port);
+		}
+		if (!set_port_range(&transcode_ports, rtp_min_port, rtp_max_port)) {
+			set_port_range(&transcode_ports, 40001, 50000);
+		}
+		item = janus_config_get_item_drilldown(config, "general", "janus_endpoint");
+		if (item && item->value) {
+			next = TRUE;
+			janus_endpoint = item->value;
+		}
+		else {
+			janus_endpoint = "http://localhost:8088/janus";
+		}
+		item = janus_config_get_item_drilldown(config, "general", "registry_endpoint");
+		if (item && item->value) {
+			next = TRUE;
+			registry_endpoint = item->value;
+		}
 		GList *cl = janus_config_get_categories(config);
+		if (next) {
+			cl = cl->next;
+		}
 		while(cl != NULL) {
 			janus_config_category *cat = (janus_config_category *)cl->data;
 			if(cat->name == NULL) {
 				cl = cl->next;
 				continue;
-			}
-			uint16_t rtp_min_port = 0, rtp_max_port = 0;
-			janus_config_item *item = janus_config_get_item_drilldown(config, "media", "rtp_port_range");
-			if(item && item->value) {
-				/* Split in min and max port */
-				char *maxport = strrchr(item->value, '-');
-				if(maxport != NULL) {
-					*maxport = '\0';
-					maxport++;
-					rtp_min_port = atoi(item->value);
-					rtp_max_port = atoi(maxport);
-					maxport--;
-					*maxport = '-';
-				}
-				if(rtp_min_port > rtp_max_port) {
-					int temp_port = rtp_min_port;
-					rtp_min_port = rtp_max_port;
-					rtp_max_port = temp_port;
-				}
-				if(rtp_max_port == 0)
-					rtp_max_port = 65535;
-				JANUS_LOG(LOG_INFO, "RTP port range: %u -- %u\n", rtp_min_port, rtp_max_port);
-			}
-			if (!set_port_range(&transcode_ports, rtp_min_port, rtp_max_port)) {
-					set_port_range(&transcode_ports, 40001, 50000);
-					cl = cl->next;
-					continue;
 			}
 			JANUS_LOG(LOG_VERB, "Adding stream '%s'\n", cat->name);
 			janus_config_item *type = janus_config_get_item(cat, "type");
@@ -1628,7 +1678,49 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
 				cl = cl->next;
 				continue;
 			}
-			if(!strcasecmp(type->value, "rtp")) {
+			if(!strcasecmp(type->value, "source")) {
+				janus_config_item *id = janus_config_get_item(cat, "id");
+				janus_config_item *uri = janus_config_get_item(cat, "uri");
+				if (!id || !id->value) {
+					JANUS_LOG(LOG_VERB, "Missing id for stream '%s', will generate a random one...\n", cat->name);					
+				}
+				else {
+					janus_mutex_lock(&transcode_sources_mutex);
+					gchar *source = g_hash_table_lookup(transcode_sources, id->value);
+					janus_mutex_unlock(&transcode_sources_mutex);
+					if(source != NULL) {
+						JANUS_LOG(LOG_ERR, "A source with the provided ID %s already exists, skipping '%s'\n", id->value, cat->name);
+						cl = cl->next;
+						continue;
+					}
+				}
+				gchar *id_value = NULL;
+				if (!id || !id->value) {
+					JANUS_LOG(LOG_VERB, "Missing id, will generate a random one...\n");
+					while(id_value == NULL) {
+						id_value = random_id();
+						if(g_hash_table_lookup(transcode_sources, id_value) != NULL) {
+							/* ID already in use, try another one */
+							id_value = NULL;
+						}
+					}
+				}
+				else {
+					id_value = g_strdup(id->value);
+				}
+				gchar *uri_value = NULL;
+				if (!uri || !uri->value) {
+					cl = cl->next;
+					continue;
+				}
+				else {
+					uri_value = g_strdup(uri->value);
+				}
+				janus_mutex_lock(&transcode_sources_mutex);
+				g_hash_table_insert(transcode_sources, id_value, uri_value);
+				janus_mutex_unlock(&transcode_sources_mutex);
+			}
+			else if(!strcasecmp(type->value, "rtp")) {
 				/* RTP live source (e.g., from gstreamer/ffmpeg/vlc/etc.) */
 				janus_config_item *id = janus_config_get_item(cat, "id");
 				janus_config_item *desc = janus_config_get_item(cat, "description");
@@ -1971,6 +2063,11 @@ void janus_streaming_destroy(void) {
 	transcode_threads = NULL;
 	janus_mutex_unlock(&transcode_threads_mutex);
 	remove_ports(&transcode_ports);
+	janus_mutex_lock(&transcode_sources_mutex);	
+	g_hash_table_remove_all(transcode_sources);
+	g_hash_table_destroy(transcode_sources);
+	transcode_sources = NULL;
+	janus_mutex_unlock(&transcode_sources_mutex);
 	if(watchdog != NULL) {
 		g_thread_join(watchdog);
 		watchdog = NULL;
@@ -3497,7 +3594,7 @@ janus_streaming_mountpoint *janus_streaming_create_rtp_source(
 	if(id == NULL) {
 		JANUS_LOG(LOG_VERB, "Missing id, will generate a random one...\n");
 		while(id == NULL) {
-			id = random_guid();
+			id = random_id();
 			if(g_hash_table_lookup(mountpoints, id) != NULL) {
 				/* ID already in use, try another one */
 				id = NULL;
@@ -3654,7 +3751,7 @@ janus_streaming_mountpoint *janus_streaming_create_file_source(
 	if(id == NULL) {
 		JANUS_LOG(LOG_VERB, "Missing id, will generate a random one...\n");
 		while(id == NULL) {
-			id = random_guid();
+			id = random_id();
 			if(g_hash_table_lookup(mountpoints, id) != NULL) {
 				/* ID already in use, try another one */
 				id = NULL;
@@ -3924,7 +4021,7 @@ janus_streaming_mountpoint *janus_streaming_create_rtsp_source(
 	if(id == NULL) {
 		JANUS_LOG(LOG_VERB, "Missing id, will generate a random one...\n");
 		while(id == NULL) {
-			id = random_guid();
+			id = random_id();
 			if(g_hash_table_lookup(mountpoints, id) != NULL) {
 				/* ID already in use, try another one */
 				id = NULL;
