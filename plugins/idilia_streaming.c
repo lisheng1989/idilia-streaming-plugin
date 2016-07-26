@@ -1279,7 +1279,6 @@ static gboolean on_error(GstBus *bus, GstMessage *message, gpointer data)
 	return TRUE;
 }
 
-// TODO error handling
 static gpointer transcode_handler(gpointer data) {
 
 	GstElement *pipeline = NULL;	
