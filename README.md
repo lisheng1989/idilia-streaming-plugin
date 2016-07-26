@@ -10,7 +10,8 @@ Streaming plugin for <b>Janus WebRTC Gateway v0.1.1</b> based on orginal streami
 
 ## Building instructions
 
-    Install Janus WebRTC Gateway
+Follow the instructions from https://github.com/meetecho/janus-gateway/blob/master/README.md and then:
+
     git clone https://github.com/MotorolaSolutions/idilia-streaming-plugin.git
     cd idilia-streaming-plugin
     sh autogen.sh
