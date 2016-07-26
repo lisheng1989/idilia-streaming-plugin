@@ -7,6 +7,9 @@ Streaming plugin for Janus WebRTC Gateway v0.1.1 based on orginal streaming plug
 Install Janus WebRTC Gateway
 
 cd idilia-streaming-plugin
+
 sh autogen.sh
+
 ./configure
+
 make install configs
