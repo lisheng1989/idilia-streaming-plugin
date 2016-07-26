@@ -90,6 +90,7 @@ PKG_CHECK_MODULES([JANUS],
                     libssl >= $ssl_version
                     libcrypto
                     sofia-sip-ua
+                    gstreamer-1.0
                   ])
 JANUS_MANUAL_LIBS+=" -lm"
 AC_SUBST(JANUS_MANUAL_LIBS)

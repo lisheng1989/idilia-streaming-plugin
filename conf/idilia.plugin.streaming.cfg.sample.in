@@ -44,7 +44,7 @@
 [general]
 rtp_port_range = 40001-50000
 janus_endpoint = http://localhost:8088/janus
-;registry_endpoint = http://localhost:4000/api/cams
+registry_endpoint = http://localhost:4000/api/cams
 
 [gstreamer-source-sample]
 type = source
