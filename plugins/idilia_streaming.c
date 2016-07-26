@@ -1208,6 +1208,77 @@ typedef struct {
 
 } pipeline_data_t;
 
+static void teardown_pipeline(janus_streaming_mountpoint *mountpoint) {
+
+	CURL *curl_handle = NULL;
+
+	do {
+		if (!mountpoint) {
+			JANUS_LOG(LOG_ERR, "Input parameter mountpoint was null.\n");
+			break;
+		}
+		janus_mutex_lock(&transcode_main_loops_mutex);		
+		GMainLoop *main_loop = g_hash_table_lookup(transcode_main_loops, mountpoint->id);
+		if (!main_loop) {
+			JANUS_LOG(LOG_ERR, "Could not find mountpoint.\n");
+		}
+		else {
+			if (!g_hash_table_remove(transcode_main_loops, mountpoint->id)) {
+				JANUS_LOG(LOG_ERR, "Could not remove main loop from the table.\n");
+			}
+			g_main_loop_quit(main_loop);
+		}
+		janus_mutex_unlock(&transcode_main_loops_mutex);
+		// allocation		
+		curl_handle = curl_easy_init();
+		if (!curl_handle) {
+			JANUS_LOG(LOG_ERR, "Could not initialize curl.\n");
+		}
+		else {
+			CURLcode  curl_code = curl_easy_streaming_plugin_message(curl_handle, janus_endpoint, message_mountpoint_destroy_request,
+																	NULL, mountpoint);
+			if (CURLE_OK != curl_code) {
+				JANUS_LOG(LOG_ERR, "Failed to destroy mountpoint.\n");
+			}
+			curl_easy_cleanup(curl_handle);
+			curl_handle = NULL;
+		}
+		remove_port(&transcode_ports, ((janus_streaming_rtp_source *)mountpoint->source)->video_port);
+	}
+	while(0);
+
+	// cleanup
+	if (curl_handle) {
+		curl_easy_cleanup(curl_handle);
+		curl_handle = NULL;
+	}
+
+}
+
+static gboolean on_eos(GstBus *bus, GstMessage *message, gpointer data)
+{
+	gchar *id = (gchar *)data;
+	janus_mutex_lock(&mountpoints_mutex);
+	janus_streaming_mountpoint *mp = g_hash_table_lookup(mountpoints, id);
+	janus_mutex_unlock(&mountpoints_mutex);
+	teardown_pipeline(mp);
+	return TRUE;
+}
+
+static gboolean on_error(GstBus *bus, GstMessage *message, gpointer data)
+{
+	GError *error = NULL;
+	gchar *debug = NULL;
+
+	gst_message_parse_error(message, &error, &debug);
+	JANUS_LOG(LOG_ERR, "Error: %s\n", error->message ? error->message : "??");
+	JANUS_LOG(LOG_DBG, "Debugging info: %s\n", debug ? debug : "??");
+	g_error_free(error);
+	g_free(debug);
+	on_eos(bus, message, data);
+	return TRUE;
+}
+
 // TODO error handling
 static gpointer transcode_handler(gpointer data) {
 
@@ -1276,12 +1347,12 @@ static gpointer transcode_handler(gpointer data) {
 		g_source_attach(bus_source, context);
 		g_source_unref(bus_source);
 		bus_source = NULL;
-		//g_signal_connect (G_OBJECT (bus), "message::error", (GCallback)error_cb, data);
-		//g_signal_connect (G_OBJECT (bus), "message::state-changed", (GCallback)state_changed_cb, data);
+		janus_mutex_lock(&transcode_main_loops_mutex);
+		main_loop = g_main_loop_new(context, FALSE);
+		g_signal_connect (G_OBJECT (bus), "message::eos", (GCallback)on_eos, pipeline_data->id);
+		g_signal_connect (G_OBJECT (bus), "message::error", (GCallback)on_error, pipeline_data->id);
 		gst_object_unref(bus);
 		bus = NULL;
-		main_loop = g_main_loop_new(context, FALSE);
-		janus_mutex_lock(&transcode_main_loops_mutex);
 		g_hash_table_insert(transcode_main_loops, pipeline_data->id, main_loop);
 		janus_mutex_unlock(&transcode_main_loops_mutex);		
 		g_free(pipeline_data);
@@ -1468,53 +1539,6 @@ static void setup_pipeline(const gchar *id) {
 		}
 		g_free(mountpoint);
 		mountpoint = NULL;
-	}
-
-}
-
-static void teardown_pipeline(janus_streaming_mountpoint *mountpoint) {
-
-	CURL *curl_handle = NULL;
-
-	do {
-		if (!mountpoint) {
-			JANUS_LOG(LOG_ERR, "Input parameter mountpoint was null.\n");
-			break;
-		}
-		janus_mutex_lock(&transcode_main_loops_mutex);		
-		GMainLoop *main_loop = g_hash_table_lookup(transcode_main_loops, mountpoint->id);
-		if (!main_loop) {
-			JANUS_LOG(LOG_ERR, "Could not find mountpoint.\n");
-		}
-		else {
-			g_main_loop_quit(main_loop);
-			if (!g_hash_table_remove(transcode_main_loops, mountpoint->id)) {
-				JANUS_LOG(LOG_ERR, "Could not remove main loop from the table.\n");
-			}
-		}
-		janus_mutex_unlock(&transcode_main_loops_mutex);
-		// allocation		
-		curl_handle = curl_easy_init();
-		if (!curl_handle) {
-			JANUS_LOG(LOG_ERR, "Could not initialize curl.\n");
-		}
-		else {
-			CURLcode  curl_code = curl_easy_streaming_plugin_message(curl_handle, janus_endpoint, message_mountpoint_destroy_request,
-																	NULL, mountpoint);
-			if (CURLE_OK != curl_code) {
-				JANUS_LOG(LOG_ERR, "Failed to destroy mountpoint.\n");
-			}
-			curl_easy_cleanup(curl_handle);
-			curl_handle = NULL;
-		}
-		remove_port(&transcode_ports, ((janus_streaming_rtp_source *)mountpoint->source)->video_port);
-	}
-	while(0);
-
-	// cleanup
-	if (curl_handle) {
-		curl_easy_cleanup(curl_handle);
-		curl_handle = NULL;
 	}
 
 }
