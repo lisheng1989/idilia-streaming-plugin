@@ -4,8 +4,6 @@ Streaming plugin for <b>Janus WebRTC Gateway v0.1.1</b> based on orginal streami
 
 ## TODO
 
-- Audio Suppot
-
 - RTCP
 
 ## Building instructions

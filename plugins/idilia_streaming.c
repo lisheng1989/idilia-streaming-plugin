@@ -891,6 +891,27 @@ static gboolean message_mountpoint_create_request(json_t *request, gpointer data
 			return_value = FALSE;
 			break;
 		}
+		if (json_object_set_new(json_object_body, "audio", json_boolean(TRUE))) {
+			JANUS_LOG(LOG_ERR, "Could not set audio json boolean.\n");
+			return_value = FALSE;
+			break;
+		}
+		if (json_object_set_new(json_object_body, "audioport",
+			json_integer(((janus_streaming_rtp_source *)mountpoint->source)->audio_port))) {
+			JANUS_LOG(LOG_ERR, "Could not set audioport json integer.\n");
+			return_value = FALSE;
+			break;
+		}
+		if (json_object_set_new(json_object_body, "audiopt", json_integer(111))) {
+			JANUS_LOG(LOG_ERR, "Could not set audiopt json integer.\n");
+			return_value = FALSE;
+			break;
+		}
+		if (json_object_set_new(json_object_body, "audiortpmap", json_string("opus/48000/2"))) {
+			JANUS_LOG(LOG_ERR, "Could not set audiortpmap json string.\n");
+			return_value = FALSE;
+			break;
+		}
 		if (json_object_set_new(json_object_body, "video", json_boolean(TRUE))) {
 			JANUS_LOG(LOG_ERR, "Could not set video json boolean.\n");
 			return_value = FALSE;
@@ -1243,6 +1264,7 @@ static void teardown_pipeline(janus_streaming_mountpoint *mountpoint) {
 			curl_easy_cleanup(curl_handle);
 			curl_handle = NULL;
 		}
+		remove_port(&transcode_ports, ((janus_streaming_rtp_source *)mountpoint->source)->audio_port);
 		remove_port(&transcode_ports, ((janus_streaming_rtp_source *)mountpoint->source)->video_port);
 	}
 	while(0);
@@ -1437,9 +1459,16 @@ static void setup_pipeline(const gchar *id) {
 		}
 
 		// allocation
-		guint port = get_port(&transcode_ports);
-		if (!port) {
-			JANUS_LOG(LOG_ERR, "Could not allocate port.\n");
+		guint audio_port = get_port(&transcode_ports);
+		if (!audio_port) {
+			JANUS_LOG(LOG_ERR, "Could not allocate audio port.\n");
+			break;
+		}
+
+		// allocation
+		guint video_port = get_port(&transcode_ports);
+		if (!video_port) {
+			JANUS_LOG(LOG_ERR, "Could not allocate video port.\n");
 			break;
 		}
 
@@ -1456,7 +1485,8 @@ static void setup_pipeline(const gchar *id) {
 			JANUS_LOG(LOG_ERR, "Could not allocate rtp source.\n");
 			break;
 		}
-		rtp_source->video_port = port;
+		rtp_source->audio_port = audio_port;
+		rtp_source->video_port = video_port;
 		mountpoint = g_malloc0(sizeof(janus_streaming_mountpoint));
 		if (!rtp_source) {
 			JANUS_LOG(LOG_ERR, "Could not allocate mountpoint.\n");
@@ -1494,8 +1524,10 @@ static void setup_pipeline(const gchar *id) {
 		pipeline_data->id = g_strdup(id);
 		// allocation - deallocated within the thread
 		pipeline_data->pipeline_string = g_strdup_printf(
-														"uridecodebin uri=\"%s\" ! x264enc ! video/x-h264, profile=baseline ! rtph264pay ! udpsink port=%d",
-														source, port);
+														"uridecodebin uri=\"%s\" name=src ! audioconvert ! audioresample ! "
+														"audio/x-raw,channels=1,rate=16000 ! opusenc bitrate=20000 ! rtpopuspay ! udpsink port=%d src. ! "
+														"x264enc ! video/x-h264, profile=baseline ! rtph264pay ! udpsink port=%d",
+														source, audio_port, video_port);
 		g_free(source);
 		source = NULL;
 		GError *error = NULL;
