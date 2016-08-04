@@ -1339,11 +1339,15 @@ static gpointer transcode_handler(gpointer data) {
 				JANUS_LOG(LOG_ERR, "Got error %d (%s) trying to parse gstreamer pipeline...\n", error->code, error->message ? error->message : "??");
 			}
 			else {
-				JANUS_LOG(LOG_ERR, "Could not parse the pipeline....\n");
+				JANUS_LOG(LOG_ERR, "Could not parse the pipeline...\n");
 			}
 			break;
 		}
 		element = gst_bin_get_by_name(GST_BIN(pipeline), "src");
+		if (!element) {
+			JANUS_LOG(LOG_ERR, "Could not get 'src' element.\n");
+			break;
+		}
 		g_signal_connect(element, "source-setup", (GCallback)source_setup, GUINT_TO_POINTER(latency));
 		if (GST_STATE_CHANGE_FAILURE == gst_element_set_state(pipeline, GST_STATE_PLAYING)) {
 			JANUS_LOG(LOG_ERR, "Could not change state of pipeline to PLAYING state.\n");
