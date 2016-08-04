@@ -130,7 +130,8 @@ url = RTSP stream URL (only if type=rtsp)
 #include "../record.h"
 #include "../utils.h"
 
-#include <gst/gst.h> 
+#include <gst/gst.h>
+#include <gst/sdp/gstsdpmessage.h>  
 
 /* Plugin information */
 #define JANUS_STREAMING_VERSION			5
@@ -1304,9 +1305,30 @@ static gboolean on_error(GstBus *bus, GstMessage *message, gpointer data)
 	return TRUE;
 }
 
+static void on_sdp(GstBin *bin, GstSDPMessage *sdp, gpointer data) {
+	int i = 0;
+	GstSDPMedia *sdpmedia = (GstSDPMedia *)gst_sdp_message_get_media(sdp, 0);
+	while(1) {
+		const gchar *val = gst_sdp_media_get_attribute_val_n(sdpmedia, "rtcp-fb", i);
+		if (!val) {
+			break;
+		}
+		if (!g_strcmp0(val, "97 nack pli")) {
+			gst_sdp_media_add_attribute(sdpmedia, "rtcp-fb-nack-pli", "");	
+		}
+		else if (!g_strcmp0(val, "97 nack")) {
+			gst_sdp_media_add_attribute(sdpmedia, "rtcp-fb-nack", "");	
+		}
+		else if (!g_strcmp0(val, "97 ccm fir")) {
+			gst_sdp_media_add_attribute(sdpmedia, "rtcp-fb-ccm-fir", "");	
+		}
+	}
+}
+
 static void source_setup(GstBin *bin, GstElement *source, gpointer data) {
  
 	g_object_set(G_OBJECT(source), "latency", GPOINTER_TO_UINT(data), NULL);
+	g_signal_connect(source, "on-sdp", (GCallback)on_sdp, NULL);
 
 }
 
@@ -1664,7 +1686,30 @@ void *janus_streaming_watchdog(void *data) {
 
 /* Plugin implementation */
 int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
-	gst_init(NULL, NULL);
+	GstDebugLevel level = GST_LEVEL_NONE;
+	gst_init(NULL, NULL);	
+	switch(janus_log_level) {
+		case LOG_FATAL:
+		case LOG_ERR:
+			level = GST_LEVEL_ERROR;
+			break;
+		case LOG_WARN:
+		case LOG_INFO:
+			level = GST_LEVEL_WARNING;
+			break;
+		case LOG_VERB:
+			level = GST_LEVEL_INFO;
+			break;
+		case LOG_HUGE:
+			level = GST_LEVEL_DEBUG;
+			break;
+		case LOG_DBG:
+			level = GST_LEVEL_TRACE;
+			break;
+		default:
+			level = GST_LEVEL_NONE;
+	}
+	gst_debug_set_default_threshold(level);
 #ifdef HAVE_LIBCURL	
 	curl_global_init(CURL_GLOBAL_ALL);
 #endif	

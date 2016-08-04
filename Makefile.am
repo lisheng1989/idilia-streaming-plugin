@@ -55,6 +55,7 @@ plugins_libadd = \
 
 plugins_ldflags = \
 	-lgstreamer-1.0 \
+	-lgstsdp-1.0 \
 	$(NULL)
 
 if ENABLE_PLUGIN_STREAMING
