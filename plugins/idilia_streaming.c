@@ -477,6 +477,8 @@ janus_mutex transcode_threads_mutex;
 janus_mutex transcode_main_loops_mutex;
 janus_mutex transcode_sources_mutex;
 
+guint latency = 0;
+
 static void g_str_destroy(gpointer data) {
 	g_free(data);
 }
@@ -1226,6 +1228,7 @@ typedef struct {
 
 	gchar *id;
 	gchar *pipeline_string;
+	guint latency;
 
 } pipeline_data_t;
 
@@ -1301,6 +1304,12 @@ static gboolean on_error(GstBus *bus, GstMessage *message, gpointer data)
 	return TRUE;
 }
 
+static void source_setup(GstBin *bin, GstElement *source, gpointer data) {
+ 
+	g_object_set(G_OBJECT(source), "latency", GPOINTER_TO_UINT(data), NULL);
+
+}
+
 static gpointer transcode_handler(gpointer data) {
 
 	GstElement *pipeline = NULL;	
@@ -1308,6 +1317,7 @@ static gpointer transcode_handler(gpointer data) {
 	GSource *bus_source = NULL;
 	GMainContext *context = NULL;
 	GMainLoop *main_loop = NULL;
+	GstElement *element = NULL;
 	pipeline_data_t *pipeline_data = (pipeline_data_t *)data;
 
 	do
@@ -1333,6 +1343,8 @@ static gpointer transcode_handler(gpointer data) {
 			}
 			break;
 		}
+		element = gst_bin_get_by_name(GST_BIN(pipeline), "src");
+		g_signal_connect(element, "source-setup", (GCallback)source_setup, GUINT_TO_POINTER(latency));
 		if (GST_STATE_CHANGE_FAILURE == gst_element_set_state(pipeline, GST_STATE_PLAYING)) {
 			JANUS_LOG(LOG_ERR, "Could not change state of pipeline to PLAYING state.\n");
 			break;
@@ -1393,7 +1405,9 @@ static gpointer transcode_handler(gpointer data) {
 			}
 			while (GST_STATE_NULL != state);
 		}
-		gst_object_unref(pipeline);
+		gst_object_unref(GST_OBJECT(element));
+		element = NULL;
+		gst_object_unref(GST_OBJECT(pipeline));
 		pipeline = NULL;
 		g_main_loop_unref(main_loop);
 		main_loop = NULL;
@@ -1419,6 +1433,10 @@ static gpointer transcode_handler(gpointer data) {
 	if (context) {
 		g_main_context_unref(context);
 		context = NULL;
+	}
+	if (element) {
+		gst_object_unref(GST_OBJECT(element));
+		element = NULL;
 	}
 	if (pipeline) {
 		gst_object_unref(pipeline);
@@ -1528,6 +1546,7 @@ static void setup_pipeline(const gchar *id) {
 														"audio/x-raw,channels=1,rate=16000 ! opusenc bitrate=20000 ! rtpopuspay ! udpsink port=%d src. ! "
 														"x264enc ! video/x-h264, profile=baseline ! rtph264pay ! udpsink port=%d",
 														source, audio_port, video_port);
+		pipeline_data->latency = latency;
 		g_free(source);
 		source = NULL;
 		GError *error = NULL;
@@ -1716,6 +1735,14 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
 			next = TRUE;
 			registry_endpoint = item->value;
 		}
+		item = janus_config_get_item_drilldown(config, "general", "latency");
+		if (item && item->value) {
+			next = TRUE;
+			latency = atoi(item->value);
+		}
+		else {
+			latency = 200;
+		} 
 		GList *cl = janus_config_get_categories(config);
 		if (next) {
 			cl = cl->next;
