@@ -505,7 +505,7 @@ static gchar *random_string(guint len) {
 
 static gchar *random_id(void) {
 
-	return random_text(24, "abcdefghijklmnopqrstuvwxyz0123456789");
+	return random_text(32, "abcdefghijklmnopqrstuvwxyz0123456789");
 
 }
 
@@ -753,22 +753,26 @@ static gchar *get_source_from_registry_by_id(const gchar *registry_url, const gc
 			break;
 		}
 		// allocation
-		url = g_strdup_printf("%s/%s", registry_url, id);
+		url = g_strdup_printf("%s/?id=%s", registry_url, id);
 		// allocation
 		json_source = json_registry_source_request(url);
 		g_free(url);
 		url = NULL;
-		if (!json_is_object(json_source)) {
+		if (!json_is_array(json_source)) {
+			JANUS_LOG(LOG_ERR, "Not valid json array.\n");
+			break;
+		}
+		json_t *json_object = json_array_get(json_source, 0);
+		if (!json_is_object(json_object)) {
 			JANUS_LOG(LOG_ERR, "Not valid json object.\n");
 			break;
-		}
-		json_t *json_id = json_object_get(json_source, "_id");
+		}		
+		json_t *json_id = json_object_get(json_object, "id");
 		if (!json_is_string(json_id)) {
-			JANUS_LOG(LOG_ERR, "_id is not a string.\n");
+			JANUS_LOG(LOG_ERR, "id is not a string.\n");
 			break;
 		}
-		// TODO: Change Source to uri
-		json_t *json_uri = json_object_get(json_source, "Source");
+		json_t *json_uri = json_object_get(json_object, "uri");
 		if (!json_is_string(json_uri)) {
 			JANUS_LOG(LOG_ERR, "uri is not a string.\n");
 			break;
@@ -1305,30 +1309,9 @@ static gboolean on_error(GstBus *bus, GstMessage *message, gpointer data)
 	return TRUE;
 }
 
-static void on_sdp(GstBin *bin, GstSDPMessage *sdp, gpointer data) {
-	int i = 0;
-	GstSDPMedia *sdpmedia = (GstSDPMedia *)gst_sdp_message_get_media(sdp, 0);
-	while(1) {
-		const gchar *val = gst_sdp_media_get_attribute_val_n(sdpmedia, "rtcp-fb", i);
-		if (!val) {
-			break;
-		}
-		if (!g_strcmp0(val, "97 nack pli")) {
-			gst_sdp_media_add_attribute(sdpmedia, "rtcp-fb-nack-pli", "");	
-		}
-		else if (!g_strcmp0(val, "97 nack")) {
-			gst_sdp_media_add_attribute(sdpmedia, "rtcp-fb-nack", "");	
-		}
-		else if (!g_strcmp0(val, "97 ccm fir")) {
-			gst_sdp_media_add_attribute(sdpmedia, "rtcp-fb-ccm-fir", "");	
-		}
-	}
-}
-
 static void source_setup(GstBin *bin, GstElement *source, gpointer data) {
  
 	g_object_set(G_OBJECT(source), "latency", GPOINTER_TO_UINT(data), NULL);
-	g_signal_connect(source, "on-sdp", (GCallback)on_sdp, NULL);
 
 }
 

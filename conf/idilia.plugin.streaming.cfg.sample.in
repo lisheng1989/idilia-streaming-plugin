@@ -49,7 +49,7 @@ latency = 200
 
 [gstreamer-source-sample]
 type = source
-id = 5784bfd27f5073aa159400a4
+id = 3a9b1d92f7ba48e2a776a80c0545c782
 uri = rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mov
 
 ;[gstreamer-sample]
