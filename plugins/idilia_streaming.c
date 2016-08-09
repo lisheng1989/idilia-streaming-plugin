@@ -1310,7 +1310,7 @@ static gboolean on_error(GstBus *bus, GstMessage *message, gpointer data)
 }
 
 static void source_setup(GstBin *bin, GstElement *source, gpointer data) {
- 
+
 	g_object_set(G_OBJECT(source), "latency", GPOINTER_TO_UINT(data), NULL);
 
 }
@@ -1553,7 +1553,7 @@ static void setup_pipeline(const gchar *id) {
 		pipeline_data->pipeline_string = g_strdup_printf(
 														"uridecodebin uri=\"%s\" name=src ! audioconvert ! audioresample ! "
 														"audio/x-raw,channels=1,rate=16000 ! opusenc bitrate=20000 ! rtpopuspay ! udpsink port=%d src. ! "
-														"x264enc ! video/x-h264, profile=baseline ! rtph264pay ! udpsink port=%d",
+														"x264enc tune=zerolatency ! video/x-h264, profile=baseline ! rtph264pay ! udpsink port=%d",
 														source, audio_port, video_port);
 		pipeline_data->latency = latency;
 		g_free(source);
