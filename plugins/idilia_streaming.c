@@ -1553,7 +1553,7 @@ static void setup_pipeline(const gchar *id) {
 		pipeline_data->pipeline_string = g_strdup_printf(
 														"uridecodebin uri=\"%s\" name=src ! audioconvert ! audioresample ! "
 														"audio/x-raw,channels=1,rate=16000 ! opusenc bitrate=20000 ! rtpopuspay ! udpsink port=%d src. ! "
-														"x264enc tune=zerolatency ! video/x-h264, profile=baseline ! rtph264pay ! udpsink port=%d",
+														"x264enc bitrate=800 tune=zerolatency key-int-max=30 ! video/x-h264, profile=baseline ! rtph264pay ! udpsink port=%d",
 														source, audio_port, video_port);
 		pipeline_data->latency = latency;
 		g_free(source);
