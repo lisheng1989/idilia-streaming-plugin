@@ -347,6 +347,11 @@ typedef struct janus_streaming_file_source {
 #define JANUS_STREAMING_VP8		0
 #define JANUS_STREAMING_H264	1
 #define JANUS_STREAMING_VP9		2
+
+/* temporary define for selecting streaming codec */ 
+#define SUPPORTED_CODEC JANUS_STREAMING_VP8
+
+
 typedef struct janus_streaming_codecs {
 	gint audio_pt;
 	char *audio_rtpmap;
@@ -870,7 +875,7 @@ static gboolean message_mountpoint_create_request(json_t *request, gpointer data
 	janus_streaming_mountpoint *mountpoint = (janus_streaming_mountpoint *)data;
 	json_t *json_object_body = NULL;
 	gboolean return_value = TRUE;
-	
+
 	do {
 		if (!request) {
 			JANUS_LOG(LOG_ERR, "Imput parameter request was null.\n");
@@ -947,7 +952,11 @@ static gboolean message_mountpoint_create_request(json_t *request, gpointer data
 			break;
 		}
 		if (json_object_set_new(json_object_body, "videortpmap",
+#if SUPPORTED_CODEC == JANUS_STREAMING_VP8
+			json_string("VP8/90000"))) {
+#else
 			json_string("H264/90000"))) {
+#endif
 			JANUS_LOG(LOG_ERR, "Could not set videortpmap json string.\n");
 			return_value = FALSE;
 			break;
@@ -1358,13 +1367,15 @@ static gpointer transcode_handler(gpointer data) {
 				JANUS_LOG(LOG_ERR, "Could not parse the pipeline...\n");
 			}
 			break;
-		}
+	}
+#if SUPPORTED_CODEC == JANUS_STREAMING_H264
 		element = gst_bin_get_by_name(GST_BIN(pipeline), "src");
 		if (!element) {
 			JANUS_LOG(LOG_ERR, "Could not get 'src' element.\n");
 			break;
 		}
 		g_signal_connect(element, "source-setup", (GCallback)source_setup, GUINT_TO_POINTER(latency));
+#endif
 		if (GST_STATE_CHANGE_FAILURE == gst_element_set_state(pipeline, GST_STATE_PLAYING)) {
 			JANUS_LOG(LOG_ERR, "Could not change state of pipeline to PLAYING state.\n");
 			break;
@@ -1561,11 +1572,28 @@ static void setup_pipeline(const gchar *id) {
 		// allocation - deallocated when removing form the transcode_main_loops hash table
 		pipeline_data->id = g_strdup(id);
 		// allocation - deallocated within the thread
+
+//temporary output codec selection
+#if SUPPORTED_CODEC == JANUS_STREAMING_VP8
+		//todo: implement RTCP and get rid of hardcoded ports
+		pipeline_data->pipeline_string = g_strdup_printf(
+			"rtpbin name=rtpbin "
+			"rtspsrc latency=%d location=%s name=rtsp_src ! application/x-rtp,media=video ! queue ! rtpvp8depay ! rtpvp8pay ! rtpbin.send_rtp_sink_0 "
+			"rtpbin.send_rtp_src_0 ! udpsink port=%d "
+			"rtpbin.send_rtcp_src_0 ! udpsink port=5001 sync=false async=false "
+			"udpsrc port=5005 ! rtpbin.recv_rtcp_sink_0 "
+			"rtsp_src.! application/x-rtp,media=audio ! rtpopusdepay ! rtpopuspay ! rtpbin.send_rtp_sink_1 "
+			"rtpbin.send_rtp_src_1 ! udpsink port=%d "
+			"rtpbin.send_rtcp_src_1 ! udpsink port=5003 sync=false async=false "
+			"udpsrc port=5007 ! rtpbin.recv_rtcp_sink_1", 
+			latency, source, video_port, audio_port);
+#else
 		pipeline_data->pipeline_string = g_strdup_printf(
 														"uridecodebin uri=\"%s\" name=src ! audioconvert ! audioresample ! "
 														"audio/x-raw,channels=1,rate=16000 ! opusenc bitrate=20000 ! rtpopuspay ! udpsink port=%d src. ! "
 														"x264enc bitrate=800 tune=zerolatency key-int-max=30 ! video/x-h264, profile=baseline ! rtph264pay ! udpsink port=%d",
 														source, audio_port, video_port);
+#endif
 		pipeline_data->latency = latency;
 		g_free(source);
 		source = NULL;
@@ -2459,6 +2487,7 @@ struct janus_plugin_result *janus_streaming_handle_message(janus_plugin_session 
 		json_object_set_new(response, "info", ml);
 		goto plugin_response;
 	} else if(!strcasecmp(request_text, "create")) {
+
 		/* Create a new stream */
 		JANUS_VALIDATE_JSON_OBJECT(root, create_parameters,
 			error_code, error_cause, TRUE,
