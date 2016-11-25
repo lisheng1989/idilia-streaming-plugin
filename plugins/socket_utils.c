@@ -138,7 +138,9 @@ void socket_utils_attach_callback(socket_utils_socket * sck, GSourceFunc func, g
 }
 
 void socket_utils_deattach_callback(socket_utils_socket * sck) {
-	g_source_destroy(sck->source);
-	g_source_unref(sck->source);
-	sck->source = NULL;
+	if (sck->source) {
+		g_source_destroy(sck->source);
+		g_source_unref(sck->source);
+		sck->source = NULL;
+	}
 }

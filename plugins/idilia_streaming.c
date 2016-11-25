@@ -68,8 +68,6 @@ videomcast = multicast group port for receiving video frames, if any
 videopt = <video RTP payload type> (e.g., 100)
 videortpmap = RTP map of the video codec (e.g., VP8/90000)
 videofmtp = Codec specific parameters, if any
-videobufferkf = yes|no (whether the plugin should store the latest
-	keyframe and send it immediately for new viewers, EXPERIMENTAL)
 
    The following options are only valid for the 'rstp' type:
 url = RTSP stream URL (only if type=rtsp)
@@ -268,7 +266,6 @@ static janus_callbacks *gateway = NULL;
 static GThread *handler_thread;
 static GThread *watchdog;
 static void *janus_streaming_handler(void *data);
-static gboolean janus_streaming_is_keyframe(gint codec, char* buffer, int len);
 
 typedef enum janus_streaming_type {
 	janus_streaming_type_none = 0,
@@ -281,16 +278,6 @@ typedef enum janus_streaming_source {
 	janus_streaming_source_file,
 	janus_streaming_source_rtp,
 } janus_streaming_source;
-
-typedef struct janus_streaming_rtp_keyframe {
-	gboolean enabled;
-	/* If enabled, we store the packets of the last keyframe, to immediately send them for new viewers */
-	GList *latest_keyframe;
-	/* This is where we store packets while we're still collecting the whole keyframe */
-	GList *temp_keyframe;
-	guint32 temp_ts;
-	janus_mutex mutex;
-} janus_streaming_rtp_keyframe;
 
 enum
 {
@@ -329,8 +316,10 @@ typedef struct {
 #ifdef HAVE_LIBCURL
 	CURL* curl;
 #endif
-	janus_streaming_rtp_keyframe keyframe;
 } janus_streaming_rtp_source;
+
+
+
 
 #define JANUS_STREAMING_VP8		0
 #define JANUS_STREAMING_H264	1
@@ -371,6 +360,19 @@ typedef struct janus_streaming_mountpoint {
 	janus_streaming_socket_cbk_data rtp_cbk_data[JANUS_STREAMING_STREAM_MAX];
 	guint32 ssrc[JANUS_STREAMING_STREAM_MAX];
 } janus_streaming_mountpoint;
+
+typedef struct {
+    janus_streaming_mountpoint * mountpoint;
+    GstElement * pipeline;
+} pipeline_callback_t;
+
+typedef struct {
+
+	gchar *id;
+	guint latency;
+	gchar *uri;
+} pipeline_data_t;
+
 GHashTable *mountpoints;
 static GList *old_mountpoints;
 janus_mutex mountpoints_mutex;
@@ -390,11 +392,33 @@ static uint16_t udp_min_port = 0, udp_max_port = 0;
 /* function declarations */
 static void janus_streaming_parse_ports_range(janus_config_item *ports_range, uint16_t * udp_min_port, uint16_t * udp_max_port);
 static gboolean janus_streaming_create_sockets(socket_utils_socket socket[JANUS_STREAMING_STREAM_MAX][JANUS_STREAMING_SOCKET_MAX]);
-static const gchar * janus_streaming_get_udpsrc_name(int stream, int type);
 gboolean janus_streaming_send_rtp_src_received(GSocket *socket, GIOCondition condition, janus_streaming_socket_cbk_data * data);
 static void janus_streaming_close_mountpoint(janus_streaming_mountpoint *mountpoint);
 static void janus_streaming_close_mountpoint_event(janus_streaming_mountpoint *mountpoint);
 static void janus_streaming_relay_rtp_packet(gpointer data, gpointer user_data);
+
+
+
+static GstElement * 
+create_remote_rtp_output(guint port, const gchar * media);
+static GstElement * 
+create_remote_rtcp_input(const gchar * media, GSocket *socket);
+static void sender_bin_add_media_pads_to_rtpbin(GstElement * bin, guint pad_id, const gchar * media);
+static GstElement * sender_bin_create(void);
+
+static void link_rtp_pad_to_sender_bin(GstElement * source, GstPad * input_pad, const gchar *media, pipeline_callback_t * callback_data);
+
+void
+rtspsrc_on_no_more_pads (GstElement *element, pipeline_callback_t * callback_data);
+
+
+static void
+rtspsrc_pad_added_callback(GstElement * element, GstPad * pad, pipeline_callback_t * callback_data);
+
+static GstElement * create_rtsp_source_element(gpointer user_data, const pipeline_data_t * pipeline_data);
+
+static GstElement *
+create_videotestsrc_bin (gpointer user_data, const pipeline_data_t * pipeline_data);
 
 
 typedef struct janus_streaming_message {
@@ -452,7 +476,6 @@ typedef struct janus_streaming_rtp_relay_packet {
 	rtp_header *data;
 	gint length;
 	gint is_video;
-	gint is_keyframe;
 	uint32_t timestamp;
 	uint16_t seq_number;
 } janus_streaming_rtp_relay_packet;
@@ -868,7 +891,7 @@ static gboolean message_mountpoint_create_request(json_t *request, gpointer data
 			return_value = FALSE;
 			break;
 		}
-		if (json_object_set_new(json_object_body, "videopt", json_integer(126))) {
+		if (json_object_set_new(json_object_body, "videopt", json_integer(100))) {
 			JANUS_LOG(LOG_ERR, "Could not set videopt json integer.\n");
 			return_value = FALSE;
 			break;
@@ -1171,12 +1194,7 @@ static CURLcode curl_easy_streaming_plugin_message(CURL *curl_handle, const gcha
 	return return_value;
 }
 
-typedef struct {
 
-	gchar *id;
-	guint latency;
-	gchar *uri;
-} pipeline_data_t;
 
 static void teardown_pipeline(janus_streaming_mountpoint *mountpoint) {
 
@@ -1254,6 +1272,267 @@ static gboolean on_error(GstBus *bus, GstMessage *message, gpointer data)
 	return TRUE;
 }
 
+static GstElement * 
+create_remote_rtp_output(guint port, const gchar * media)
+{
+    GstElement * udpsink;
+
+    gchar *name = g_strdup_printf("rtp_sink_%s", media);
+    udpsink = gst_element_factory_make ("udpsink", name);
+    g_assert (udpsink);
+    g_object_set (G_OBJECT (udpsink), "port", port, NULL);
+    g_free(name);
+
+    return udpsink;
+}
+
+static GstElement * 
+create_remote_rtcp_input(const gchar * media, GSocket *socket)
+{
+    GstElement * udpsrc;
+    gchar *name = g_strdup_printf("rtcp_src_%s", media);
+
+    udpsrc = gst_element_factory_make ("udpsrc", name);
+    g_assert (udpsrc);
+    g_object_set(udpsrc, "socket", socket, NULL);
+	g_object_set(udpsrc, "close-socket", FALSE, NULL);
+    g_free(name);
+
+    return udpsrc;
+}
+
+static void sender_bin_add_media_pads_to_rtpbin(GstElement * bin, guint pad_id, const gchar * media) {
+
+    GstElement * rtpbin;
+    GstPad *rtpbin_send_rtp_sink_pad, *rtpbin_send_rtp_src_pad, *rtpbin_recv_rctp_sink_pad;
+
+    gchar * sinkpad_name, *srcpad_name, *rtcp_sinkpad_name, * rtpbin_sinkpad_name, *rtpbin_srcpad_name, *rtpbin_recv_rtcp_sink_pad_name;
+
+    sinkpad_name = g_strdup_printf("%s_sink", media);
+    srcpad_name = g_strdup_printf("%s_src", media);
+    rtcp_sinkpad_name = g_strdup_printf("%s_rtcp_sink", media);
+    rtpbin_sinkpad_name = g_strdup_printf("send_rtp_sink_%u", pad_id);
+    rtpbin_srcpad_name = g_strdup_printf("send_rtp_src_%u", pad_id);
+    rtpbin_recv_rtcp_sink_pad_name = g_strdup_printf("recv_rtcp_sink_%u", pad_id);
+
+    rtpbin = gst_bin_get_by_name(GST_BIN(bin), "rtpbin");
+    g_assert(rtpbin);
+
+    rtpbin_send_rtp_sink_pad = gst_element_get_request_pad (rtpbin, rtpbin_sinkpad_name);
+    g_assert(rtpbin_send_rtp_sink_pad);
+
+    gst_element_add_pad (bin, gst_ghost_pad_new (sinkpad_name, rtpbin_send_rtp_sink_pad));
+    gst_object_unref (rtpbin_send_rtp_sink_pad);
+
+    rtpbin_send_rtp_src_pad = gst_element_get_static_pad (rtpbin, rtpbin_srcpad_name);
+    g_assert(rtpbin_send_rtp_src_pad);
+
+    gst_element_add_pad (bin, gst_ghost_pad_new (srcpad_name, rtpbin_send_rtp_src_pad));
+    gst_object_unref (rtpbin_send_rtp_src_pad);
+
+    rtpbin_recv_rctp_sink_pad = gst_element_get_request_pad (rtpbin, rtpbin_recv_rtcp_sink_pad_name);
+    g_assert(rtpbin_recv_rctp_sink_pad);
+
+    gst_element_add_pad (bin, gst_ghost_pad_new (rtcp_sinkpad_name, rtpbin_recv_rctp_sink_pad));
+    gst_object_unref (rtpbin_recv_rctp_sink_pad);
+
+    g_free(sinkpad_name);
+    g_free(srcpad_name);
+    g_free(rtpbin_sinkpad_name);
+    g_free(rtpbin_srcpad_name);   
+    g_free(rtcp_sinkpad_name);
+    g_free(rtpbin_recv_rtcp_sink_pad_name);   
+
+}
+
+static GstElement * sender_bin_create (void)
+{
+    GstElement *bin, *rtpbin;
+
+    bin = gst_bin_new ("sender_bin");
+    g_assert (bin);
+
+    rtpbin = gst_element_factory_make ("rtpbin", "rtpbin");
+    g_assert (rtpbin);
+
+    g_object_set (G_OBJECT (rtpbin), "rtp-profile", 3, NULL);
+    g_object_set (G_OBJECT (rtpbin), "latency",  0, NULL);
+
+    gst_bin_add_many (GST_BIN (bin), rtpbin, NULL);
+
+    sender_bin_add_media_pads_to_rtpbin(bin, 0, "video");
+    sender_bin_add_media_pads_to_rtpbin(bin, 1, "audio");
+
+    return bin;
+}
+
+
+static void link_rtp_pad_to_sender_bin(GstElement * source, GstPad * input_pad, const gchar *media, pipeline_callback_t * callback_data)
+{
+    GstElement *output_bin = NULL, * sender_bin, *rtcp_src;
+    gchar * sinkpad_name, *srcpad_name, *rtcp_sinkpad_name;
+    GstElement * pipeline = callback_data->pipeline;
+    gint stream_type;
+    GstPad * output_sinkpad, * senderbin_sinkpad, *senderbin_srcpad, *rtcp_srcpad, *senderbin_rtcp_sinkpad;
+    g_assert(input_pad);
+    g_assert(pipeline);
+    g_assert(media);
+
+    sender_bin = gst_bin_get_by_name(GST_BIN(pipeline), "sender_bin");
+    g_assert(sender_bin);
+
+    if (!g_strcmp0 (media, "audio")) {
+      stream_type = JANUS_STREAMING_STREAM_AUDIO;
+    } else if (!g_strcmp0 (media, "video")) {
+      stream_type = JANUS_STREAMING_STREAM_VIDEO;
+    } else {
+      return;
+    }
+
+    output_bin = create_remote_rtp_output(callback_data->mountpoint->socket[stream_type][JANUS_STREAMING_SOCKET_RTP_SRV].port, media);
+    g_assert(output_bin);
+
+    rtcp_src = create_remote_rtcp_input(media, callback_data->mountpoint->socket[stream_type][JANUS_STREAMING_SOCKET_RTCP_RCV_SRV].socket);
+    g_assert(rtcp_src);
+
+    gst_bin_add_many (GST_BIN (pipeline), output_bin, rtcp_src, NULL);
+    g_assert (gst_element_set_state (output_bin, GST_STATE_PLAYING) != GST_STATE_CHANGE_FAILURE);
+
+    sinkpad_name = g_strdup_printf("%s_sink", media);
+    srcpad_name = g_strdup_printf("%s_src", media);
+    rtcp_sinkpad_name = g_strdup_printf("%s_rtcp_sink", media);
+
+    senderbin_sinkpad = gst_element_get_static_pad (sender_bin, sinkpad_name);
+    g_assert(senderbin_sinkpad);
+
+    senderbin_srcpad = gst_element_get_static_pad (sender_bin, srcpad_name);
+    g_assert(senderbin_srcpad);
+
+    output_sinkpad = gst_element_get_static_pad (output_bin, "sink");
+    g_assert(output_sinkpad);
+
+    senderbin_rtcp_sinkpad = gst_element_get_static_pad (sender_bin, rtcp_sinkpad_name);
+    g_assert(senderbin_rtcp_sinkpad);
+
+    rtcp_srcpad = gst_element_get_static_pad (rtcp_src, "src");
+    g_assert(rtcp_srcpad);
+
+    g_assert (gst_pad_link (input_pad, senderbin_sinkpad) == GST_PAD_LINK_OK);
+    g_assert (gst_pad_link (senderbin_srcpad, output_sinkpad) == GST_PAD_LINK_OK);
+    g_assert (gst_pad_link (rtcp_srcpad, senderbin_rtcp_sinkpad) == GST_PAD_LINK_OK);
+
+    g_free(sinkpad_name);
+    g_free(srcpad_name);
+    g_free(rtcp_sinkpad_name);
+
+    //todo: add media type capsfilter in sender bin for automatic linking 
+    //gst_element_link_many (source, sender_bin, output_bin, NULL);
+}
+
+void
+rtspsrc_on_no_more_pads (GstElement *element, pipeline_callback_t * callback_data)
+{
+    GstElement * pipeline = callback_data->pipeline;
+    g_assert(GST_IS_PIPELINE(pipeline));
+    GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(pipeline), GST_DEBUG_GRAPH_SHOW_STATES, "pipeline");
+}
+
+static void
+rtspsrc_pad_added_callback(GstElement * element, GstPad * pad, pipeline_callback_t * callback_data)
+{
+    GstCaps *caps;
+    GstStructure *s;
+    const gchar *media;
+    const gchar *type;
+    gboolean connect_output = FALSE;
+    GstElement * pipeline = callback_data->pipeline;
+
+    g_assert(GST_IS_PIPELINE(pipeline));
+
+    caps = gst_pad_get_current_caps (pad);
+
+    if (caps != NULL) {
+        s = gst_caps_get_structure (caps, 0);
+
+        type = gst_structure_get_name(s);
+
+        if (!g_strcmp0 (type, "application/x-rtp")) {
+            media = gst_structure_get_string (s, "media");
+
+            if (!g_strcmp0 (media, "audio")) {
+                connect_output = TRUE;
+            } else if (!g_strcmp0 (media, "video")) {
+                connect_output = TRUE;
+            } else {
+                JANUS_LOG (LOG_WARN, "Unknown media type: %s\n", media);
+            }
+        } else if (!g_strcmp0 (type, "application/x-rtcp")) {
+
+        } else {
+			JANUS_LOG (LOG_WARN, "Unknown type: %s\n", type);
+        }
+   
+        gst_caps_unref (caps);
+    }
+
+    if (connect_output) {
+        link_rtp_pad_to_sender_bin(element, pad, media, callback_data);
+    }
+}
+
+
+static GstElement * create_rtsp_source_element(gpointer user_data, const pipeline_data_t * pipeline_data)
+{
+  
+  GstElement * source = NULL;
+
+  source = gst_element_factory_make ("rtspsrc", "source");
+  g_assert (source);
+  g_object_set (G_OBJECT (source), 
+      "location", pipeline_data->uri,
+      "latency",  pipeline_data->latency, 
+      "async-handling", TRUE, 
+      NULL);
+
+  g_signal_connect(source, "pad-added",    (GCallback) rtspsrc_pad_added_callback, user_data);
+  g_signal_connect(source, "no-more-pads", (GCallback) rtspsrc_on_no_more_pads,    user_data);
+
+  return source;
+}
+
+static GstElement *
+create_videotestsrc_bin (gpointer user_data, const pipeline_data_t * pipeline_data)
+{
+  GstElement *bin, *source, *converter, *encoder, *payloader;
+  GstPad *pad;
+
+  bin = gst_bin_new ("videotestsrcbin");
+  g_assert (bin);
+
+  source = gst_element_factory_make ("videotestsrc", "source");
+  g_assert (source);
+
+  converter = gst_element_factory_make ("videoconvert", "converter");
+  g_assert (converter);
+
+  encoder = gst_element_factory_make ("vp8enc", "encoder");
+  g_assert (encoder);
+
+  payloader = gst_element_factory_make ("rtpvp8pay", "payloader");
+  g_assert (payloader);
+
+  gst_bin_add_many (GST_BIN (bin), source, converter, encoder, payloader, NULL);
+
+  gst_element_link_many (source, converter, encoder, payloader, NULL);
+
+  pad = gst_element_get_static_pad (payloader, "src");
+  gst_element_add_pad (bin, gst_ghost_pad_new ("src", pad));
+  gst_object_unref (pad);
+
+  return bin;
+}
+
+
 static gpointer transcode_handler(gpointer data) {
 
 	GstElement *pipeline = NULL;	
@@ -1292,42 +1571,34 @@ static gpointer transcode_handler(gpointer data) {
 			break;
 		}
 
-		gchar * pipeline_string = g_strdup_printf(
-			"rtpbin name=rtpbin rtp-profile=3 "
-			"rtspsrc latency=%d location=%s name=rtsp_src ! application/x-rtp,media=video, rtcp-fb-nack-pli=true ! rtpvp8depay !  rtpvp8pay ! application/x-rtp, media=video, payload=126, encoding-name=VP8, rtcp-fb-nack-pli=true, rtp-profile=3 ! rtpbin.send_rtp_sink_0 "
-			"rtpbin.send_rtp_src_0 ! udpsink port=%d "
-			"rtpbin.send_rtcp_src_0 ! udpsink port=%d sync=false async=false "
-			"udpsrc name=%s ! rtpbin.recv_rtcp_sink_0 "
-			"rtsp_src.! application/x-rtp,media=audio ! rtpopusdepay ! rtpopuspay ! rtpbin.send_rtp_sink_1 "
-			"rtpbin.send_rtp_src_1 ! udpsink port=%d "
-			"rtpbin.send_rtcp_src_1 ! udpsink port=%d sync=false async=false "
-			"udpsrc name=%s ! rtpbin.recv_rtcp_sink_1", 
-			pipeline_data->latency, pipeline_data->uri, 
-			mountpoint->socket[JANUS_STREAMING_STREAM_VIDEO][JANUS_STREAMING_SOCKET_RTP_SRV].port, 
-			mountpoint->socket[JANUS_STREAMING_STREAM_VIDEO][JANUS_STREAMING_SOCKET_RTCP_SND_SRV].port, 
-			janus_streaming_get_udpsrc_name(JANUS_STREAMING_STREAM_VIDEO, JANUS_STREAMING_SOCKET_RTCP_RCV_SRV),
-			mountpoint->socket[JANUS_STREAMING_STREAM_AUDIO][JANUS_STREAMING_SOCKET_RTP_SRV].port, 
-			mountpoint->socket[JANUS_STREAMING_STREAM_AUDIO][JANUS_STREAMING_SOCKET_RTCP_SND_SRV].port, 
-			janus_streaming_get_udpsrc_name(JANUS_STREAMING_STREAM_AUDIO, JANUS_STREAMING_SOCKET_RTCP_RCV_SRV)
-			);
+		GstElement *sender_bin, *source = NULL;
+		pipeline_callback_t callback_data;
 
-		GError *error = NULL;
-		pipeline = gst_parse_launch(pipeline_string, &error);
-		g_free(pipeline_data->uri);
-		pipeline_data->uri = NULL;
-		if (!pipeline) {
-			if (error) {
-				JANUS_LOG(LOG_ERR, "Got error %d (%s) trying to parse gstreamer pipeline...\n", error->code, error->message ? error->message : "??");
-			}
-			else {
-				JANUS_LOG(LOG_ERR, "Could not parse the pipeline...\n");
-			}
-			break;
-	    }
+		/* create a new pipeline to hold the elements */
+		pipeline = gst_pipeline_new ("pipeline");
+		g_assert (pipeline);
 
-		GstElement * rtpbin = gst_bin_get_by_name(GST_BIN(pipeline), "rtpbin");
-		if (!rtpbin) {
-			JANUS_LOG(LOG_ERR, "Could not get 'rtpbin' element.\n");
+		sender_bin = sender_bin_create();
+		g_assert (sender_bin);
+
+		/* add objects to the main pipeline, this takes ownership */
+    	gst_bin_add_many (GST_BIN (pipeline), sender_bin, NULL);
+
+		callback_data.pipeline = pipeline;
+		callback_data.mountpoint = mountpoint;
+
+		if (g_str_has_prefix (pipeline_data->uri, "rtsp://")) {
+			source = create_rtsp_source_element(&callback_data, pipeline_data);
+			gst_bin_add_many (GST_BIN (pipeline), source, NULL);
+		} else if (g_str_has_prefix (pipeline_data->uri, "videotestsrc://")) { 
+			source = create_videotestsrc_bin(pipeline, pipeline_data);
+			GstElement * output_bin = create_remote_rtp_output(
+				mountpoint->socket[JANUS_STREAMING_STREAM_VIDEO][JANUS_STREAMING_SOCKET_RTP_SRV].port, 
+				"video");
+			gst_bin_add_many (GST_BIN (pipeline), source, output_bin, NULL);
+			gst_element_link_many (source, sender_bin, output_bin, NULL);
+		} else {
+			JANUS_LOG(LOG_ERR, "Unsupported source protocol!\n");
 			break;
 		}
 
@@ -1340,27 +1611,6 @@ static gpointer transcode_handler(gpointer data) {
 			socket_utils_attach_callback(&mountpoint->socket[stream][JANUS_STREAMING_SOCKET_RTP_SRV],
 				(GSourceFunc)janus_streaming_send_rtp_src_received,
 				(gpointer)&mountpoint->rtp_cbk_data[stream]);
-		}
-
-		for (int stream = 0; stream < JANUS_STREAMING_STREAM_MAX; stream++)
-		{
-			GstElement * udpsrc_rtcp_receive = gst_bin_get_by_name(GST_BIN(pipeline), janus_streaming_get_udpsrc_name(stream, JANUS_STREAMING_SOCKET_RTCP_RCV_SRV));
-			
-			g_assert(udpsrc_rtcp_receive);
-		
-			GSocket * socket = NULL; 
-			
-			socket = (mountpoint->socket[stream][JANUS_STREAMING_SOCKET_RTCP_RCV_SRV].socket);
-
-			if(socket) {
-				g_assert(socket);
-				g_object_set(udpsrc_rtcp_receive, "socket", socket, NULL);
-				g_object_set(udpsrc_rtcp_receive, "close-socket", FALSE, NULL);
-				g_object_unref(udpsrc_rtcp_receive);					
-			}
-			else {
-				JANUS_LOG(LOG_ERR, "Socket %d: %d is null\n", stream, JANUS_STREAMING_SOCKET_RTCP_RCV_SRV);
-			}		
 		}
 
 		if (GST_STATE_CHANGE_FAILURE == gst_element_set_state(pipeline, GST_STATE_PLAYING)) {
@@ -2411,8 +2661,6 @@ struct janus_plugin_result *janus_streaming_handle_message(janus_plugin_session 
 					janus_config_add_item(config, mp->name, "videortpmap", mp->codecs.video_rtpmap);
 					if(mp->codecs.video_fmtp)
 						janus_config_add_item(config, mp->name, "videofmtp", mp->codecs.video_fmtp);
-					if(source->keyframe.enabled)
-						janus_config_add_item(config, mp->name, "videobufferkf", "yes");
 				}
 			} 
 			/* Some more common values */
@@ -2792,24 +3040,6 @@ void janus_streaming_setup_media(janus_plugin_session *handle) {
 	session->context.v_last_seq = 0;
 	session->context.v_base_seq = 0;
 	session->context.v_base_seq_prev = 0;
-	/* If this is related to a live RTP mountpoint, any keyframe we can shoot already? */
-	janus_streaming_mountpoint *mountpoint = session->mountpoint;
-	if(mountpoint->streaming_source == janus_streaming_source_rtp) {
-		janus_streaming_rtp_source *source = mountpoint->source;
-		if(source->keyframe.enabled) {
-			JANUS_LOG(LOG_HUGE, "Any keyframe to send?\n");
-			janus_mutex_lock(&source->keyframe.mutex);
-			if(source->keyframe.latest_keyframe != NULL) {
-				JANUS_LOG(LOG_HUGE, "Yep! %d packets\n", g_list_length(source->keyframe.latest_keyframe));
-				GList *temp = source->keyframe.latest_keyframe;
-				while(temp) {
-					janus_streaming_relay_rtp_packet(session, temp->data);
-					temp = temp->next;
-				}
-			}
-			janus_mutex_unlock(&source->keyframe.mutex);
-		}
-	}
 	session->started = TRUE;
 	/* Prepare JSON event */
 	json_t *event = json_object();
@@ -2829,6 +3059,7 @@ void janus_streaming_incoming_rtp(janus_plugin_session *handle, int video, char 
 }
 
 void janus_streaming_incoming_rtcp(janus_plugin_session *handle, int video, char *buf, int len) {
+
 	if(handle == NULL || handle->stopped || g_atomic_int_get(&stopping) || !g_atomic_int_get(&initialized))
 		return;
 
@@ -3225,27 +3456,7 @@ static void janus_streaming_rtp_source_free(janus_streaming_rtp_source *source) 
 	if(source->video_fd > 0) {
 		close(source->video_fd);
 	}
-	janus_mutex_lock(&source->keyframe.mutex);
-	GList *temp = NULL;
-	while(source->keyframe.latest_keyframe) {
-		temp = g_list_first(source->keyframe.latest_keyframe);
-		source->keyframe.latest_keyframe = g_list_remove_link(source->keyframe.latest_keyframe, temp);
-		janus_streaming_rtp_relay_packet *pkt = (janus_streaming_rtp_relay_packet *)temp->data;
-		g_free(pkt->data);
-		g_free(pkt);
-		g_list_free(temp);
-	}
-	source->keyframe.latest_keyframe = NULL;
-	while(source->keyframe.temp_keyframe) {
-		temp = g_list_first(source->keyframe.temp_keyframe);
-		source->keyframe.temp_keyframe = g_list_remove_link(source->keyframe.temp_keyframe, temp);
-		janus_streaming_rtp_relay_packet *pkt = (janus_streaming_rtp_relay_packet *)temp->data;
-		g_free(pkt->data);
-		g_free(pkt);
-		g_list_free(temp);
-	}
-	source->keyframe.latest_keyframe = NULL;
-	janus_mutex_unlock(&source->keyframe.mutex);
+	
 #ifdef HAVE_LIBCURL
 	if(source->curl) {
 		/* Send an RTSP TEARDOWN */
@@ -3340,11 +3551,6 @@ janus_streaming_mountpoint *janus_streaming_create_rtp_source(
 	janus_mutex_init(&live_rtp_source->rec_mutex);
 	live_rtp_source->last_received_audio = janus_get_monotonic_time();
 	live_rtp_source->last_received_video = janus_get_monotonic_time();
-	live_rtp_source->keyframe.enabled = bufferkf;
-	live_rtp_source->keyframe.latest_keyframe = NULL;
-	live_rtp_source->keyframe.temp_keyframe = NULL;
-	live_rtp_source->keyframe.temp_ts = 0;
-	janus_mutex_init(&live_rtp_source->keyframe.mutex);
 	live_rtp->source = live_rtp_source;
 	live_rtp->source_destroy = (GDestroyNotify) janus_streaming_rtp_source_free;
 	live_rtp->codecs.audio_pt = doaudio ? acodec : -1;
@@ -3424,7 +3630,7 @@ static void janus_streaming_relay_rtp_packet(gpointer data, gpointer user_data) 
 		//~ JANUS_LOG(LOG_ERR, "Invalid session...\n");
 		return;
 	}
-	if(!packet->is_keyframe && (!session->started || session->paused)) {
+	if((!session->started || session->paused)) {
 		//~ JANUS_LOG(LOG_ERR, "Streaming not started yet for this session...\n");
 		return;
 	}
@@ -3436,7 +3642,7 @@ static void janus_streaming_relay_rtp_packet(gpointer data, gpointer user_data) 
 
 gboolean janus_streaming_send_rtp_src_received(GSocket *socket, GIOCondition condition, janus_streaming_socket_cbk_data * data)
 {
-	char buf[4 * 1024]; // todo
+	char buf[1500];
 	gssize len;
 
 	janus_streaming_mountpoint * mountpoint = (janus_streaming_mountpoint*)data->session;
@@ -3460,7 +3666,6 @@ gboolean janus_streaming_send_rtp_src_received(GSocket *socket, GIOCondition con
 		packet.data = rtp;
 		packet.length = len;
 		packet.is_video = data->is_video;
-		packet.is_keyframe = 0; //todo: support resending keyframes?
 
 		packet.timestamp = ntohl(packet.data->timestamp);
 		packet.seq_number = ntohs(packet.data->seq_number);
@@ -3475,134 +3680,6 @@ gboolean janus_streaming_send_rtp_src_received(GSocket *socket, GIOCondition con
 	return TRUE;
 }
 
-/* Helpers to check if frame is a key frame (see post processor code) */
-#if defined(__ppc__) || defined(__ppc64__)
-	# define swap2(d)  \
-	((d&0x000000ff)<<8) |  \
-	((d&0x0000ff00)>>8)
-#else
-	# define swap2(d) d
-#endif
-
-static gboolean janus_streaming_is_keyframe(gint codec, char* buffer, int len) {
-	if(codec == JANUS_STREAMING_VP8) {
-		/* VP8 packet */
-		if(!buffer || len < 28)
-			return FALSE;
-		/* Parse RTP header first */
-		rtp_header *header = (rtp_header *)buffer;
-		guint32 timestamp = ntohl(header->timestamp);
-		guint16 seq = ntohs(header->seq_number);
-		JANUS_LOG(LOG_HUGE, "Checking if VP8 packet (size=%d, seq=%"SCNu16", ts=%"SCNu32") is a key frame...\n",
-			len, seq, timestamp);
-		uint16_t skip = 0;
-		if(header->extension) {
-			janus_rtp_header_extension *ext = (janus_rtp_header_extension *)(buffer+12);
-			JANUS_LOG(LOG_HUGE, "  -- RTP extension found (type=%"SCNu16", length=%"SCNu16")\n",
-				ntohs(ext->type), ntohs(ext->length));
-			skip = 4 + ntohs(ext->length)*4;
-		}
-		buffer += 12+skip;
-		/* Parse VP8 header now */
-		uint8_t vp8pd = *buffer;
-		uint8_t xbit = (vp8pd & 0x80);
-		uint8_t sbit = (vp8pd & 0x10);
-		if(xbit) {
-			JANUS_LOG(LOG_HUGE, "  -- X bit is set!\n");
-			/* Read the Extended control bits octet */
-			buffer++;
-			vp8pd = *buffer;
-			uint8_t ibit = (vp8pd & 0x80);
-			uint8_t lbit = (vp8pd & 0x40);
-			uint8_t tbit = (vp8pd & 0x20);
-			uint8_t kbit = (vp8pd & 0x10);
-			if(ibit) {
-				JANUS_LOG(LOG_HUGE, "  -- I bit is set!\n");
-				/* Read the PictureID octet */
-				buffer++;
-				vp8pd = *buffer;
-				uint16_t picid = vp8pd, wholepicid = picid;
-				uint8_t mbit = (vp8pd & 0x80);
-				if(mbit) {
-					JANUS_LOG(LOG_HUGE, "  -- M bit is set!\n");
-					memcpy(&picid, buffer, sizeof(uint16_t));
-					wholepicid = ntohs(picid);
-					picid = (wholepicid & 0x7FFF);
-					buffer++;
-				}
-				JANUS_LOG(LOG_HUGE, "  -- -- PictureID: %"SCNu16"\n", picid);
-			}
-			if(lbit) {
-				JANUS_LOG(LOG_HUGE, "  -- L bit is set!\n");
-				/* Read the TL0PICIDX octet */
-				buffer++;
-				vp8pd = *buffer;
-			}
-			if(tbit || kbit) {
-				JANUS_LOG(LOG_HUGE, "  -- T/K bit is set!\n");
-				/* Read the TID/KEYIDX octet */
-				buffer++;
-				vp8pd = *buffer;
-			}
-			buffer++;	/* Now we're in the payload */
-			if(sbit) {
-				JANUS_LOG(LOG_HUGE, "  -- S bit is set!\n");
-				unsigned long int vp8ph = 0;
-				memcpy(&vp8ph, buffer, 4);
-				vp8ph = ntohl(vp8ph);
-				uint8_t pbit = ((vp8ph & 0x01000000) >> 24);
-				if(!pbit) {
-					JANUS_LOG(LOG_HUGE, "  -- P bit is NOT set!\n");
-					/* It is a key frame! Get resolution for debugging */
-					unsigned char *c = (unsigned char *)buffer+3;
-					/* vet via sync code */
-					if(c[0]!=0x9d||c[1]!=0x01||c[2]!=0x2a) {
-						JANUS_LOG(LOG_WARN, "First 3-bytes after header not what they're supposed to be?\n");
-					} else {
-						int vp8w = swap2(*(unsigned short*)(c+3))&0x3fff;
-						int vp8ws = swap2(*(unsigned short*)(c+3))>>14;
-						int vp8h = swap2(*(unsigned short*)(c+5))&0x3fff;
-						int vp8hs = swap2(*(unsigned short*)(c+5))>>14;
-						JANUS_LOG(LOG_HUGE, "Got a VP8 key frame: %dx%d (scale=%dx%d)\n", vp8w, vp8h, vp8ws, vp8hs);
-						return TRUE;
-					}
-				}
-			}
-		}
-		/* If we got here it's not a key frame */
-		return FALSE;
-	} else if(codec == JANUS_STREAMING_H264) {
-		/* Parse RTP header first */
-		rtp_header *header = (rtp_header *)buffer;
-		guint32 timestamp = ntohl(header->timestamp);
-		guint16 seq = ntohs(header->seq_number);
-		JANUS_LOG(LOG_HUGE, "Checking if H264 packet (size=%d, seq=%"SCNu16", ts=%"SCNu32") is a key frame...\n",
-			len, seq, timestamp);
-		uint16_t skip = 0;
-		if(header->extension) {
-			janus_rtp_header_extension *ext = (janus_rtp_header_extension *)(buffer+12);
-			JANUS_LOG(LOG_HUGE, "  -- RTP extension found (type=%"SCNu16", length=%"SCNu16")\n",
-				ntohs(ext->type), ntohs(ext->length));
-			skip = 4 + ntohs(ext->length)*4;
-		}
-		buffer += 12+skip;
-		/* Parse H264 header now */
-		uint8_t fragment = *buffer & 0x1F;
-		uint8_t nal = *(buffer+1) & 0x1F;
-		uint8_t start_bit = *(buffer+1) & 0x80;
-		JANUS_LOG(LOG_HUGE, "Fragment=%d, NAL=%d, Start=%d\n", fragment, nal, start_bit);
-		if(fragment == 5 ||
-				((fragment == 28 || fragment == 29) && nal == 5 && start_bit == 128)) {
-			JANUS_LOG(LOG_HUGE, "Got an H264 key frame\n");
-			return TRUE;
-		}
-		/* If we got here it's not a key frame */
-		return FALSE;
-	} else {
-		/* FIXME Not a clue */
-		return FALSE;
-	}
-}
 
 static void janus_streaming_parse_ports_range(janus_config_item *ports_range, uint16_t *min_port, uint16_t * max_port)
 {
@@ -3658,37 +3735,4 @@ static gboolean janus_streaming_create_sockets(socket_utils_socket socket[JANUS_
 	return result;
 }
 
-static const gchar * janus_streaming_get_udpsrc_name(int stream, int type) { 
-	switch(stream)
-	{
-		case JANUS_STREAMING_STREAM_VIDEO:
-			switch (type)
-			{
-			case JANUS_STREAMING_SOCKET_RTP_SRV:
-				return "udpsrc_rtp_video";
-			case JANUS_STREAMING_SOCKET_RTCP_RCV_SRV:
-				return "udpsrc_rtcp_rcv_video";
-			default:
-				break;
-			}
-			break ;
 
-		case JANUS_STREAMING_STREAM_AUDIO :
-			switch (type)
-			{
-			case JANUS_STREAMING_SOCKET_RTP_SRV:
-				return "udpsrc_rtp_audio";
-			case JANUS_STREAMING_SOCKET_RTCP_RCV_SRV:
-				return "udpsrc_rtcp_rcv_audio";
-			default:
-				break;
-			}
-			break ;
-		default:
-			break;
-	 }
-	
-	JANUS_LOG(LOG_ERR, "Error, not implemented!");
-	
-	return NULL;
-}
