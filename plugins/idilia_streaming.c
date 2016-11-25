@@ -891,7 +891,7 @@ static gboolean message_mountpoint_create_request(json_t *request, gpointer data
 			return_value = FALSE;
 			break;
 		}
-		if (json_object_set_new(json_object_body, "videopt", json_integer(100))) {
+		if (json_object_set_new(json_object_body, "videopt", json_integer(96))) {
 			JANUS_LOG(LOG_ERR, "Could not set videopt json integer.\n");
 			return_value = FALSE;
 			break;
@@ -1521,6 +1521,10 @@ create_videotestsrc_bin (gpointer user_data, const pipeline_data_t * pipeline_da
   payloader = gst_element_factory_make ("rtpvp8pay", "payloader");
   g_assert (payloader);
 
+  g_object_set (G_OBJECT (payloader), 
+      "pt", 96,
+      NULL);
+
   gst_bin_add_many (GST_BIN (bin), source, converter, encoder, payloader, NULL);
 
   gst_element_link_many (source, converter, encoder, payloader, NULL);
@@ -1542,6 +1546,8 @@ static gpointer transcode_handler(gpointer data) {
 	GMainLoop *main_loop = NULL;
 	GstElement *element = NULL;
 	pipeline_data_t *pipeline_data = (pipeline_data_t *)data;
+
+	JANUS_LOG(LOG_ERR, "transcode_handler\n");
 
 	do
 	{
@@ -1617,8 +1623,10 @@ static gpointer transcode_handler(gpointer data) {
 			JANUS_LOG(LOG_ERR, "Could not change state of pipeline to PLAYING state.\n");
 			break;
 		}
+
 		GstState state;
 		GstStateChangeReturn ret;
+	#if 0
 		do
 		{
 			if (GST_STATE_CHANGE_FAILURE == (ret = gst_element_get_state(pipeline,
@@ -1631,6 +1639,7 @@ static gpointer transcode_handler(gpointer data) {
 		if (GST_STATE_CHANGE_FAILURE == ret) {
 			break;
 		}
+#endif
 		if (NULL == (bus = gst_element_get_bus (pipeline))) {
 			JANUS_LOG(LOG_ERR, "Could not get the bus.\n");
 			break;
@@ -1639,6 +1648,8 @@ static gpointer transcode_handler(gpointer data) {
 			JANUS_LOG(LOG_ERR, "Could not create a watch.\n");
 			break;
 		}
+
+
 		if (NULL == (context = g_main_context_new())) {
 			JANUS_LOG(LOG_ERR, "Could not create new context.\n");
 			break;
@@ -3060,6 +3071,8 @@ void janus_streaming_incoming_rtp(janus_plugin_session *handle, int video, char 
 
 void janus_streaming_incoming_rtcp(janus_plugin_session *handle, int video, char *buf, int len) {
 
+
+
 	if(handle == NULL || handle->stopped || g_atomic_int_get(&stopping) || !g_atomic_int_get(&initialized))
 		return;
 
@@ -3084,7 +3097,7 @@ void janus_streaming_incoming_rtcp(janus_plugin_session *handle, int video, char
 		GSocket * sock_rtcp_cli = mountpoint->socket[stream_type][JANUS_STREAMING_SOCKET_RTCP_RCV_CLI].socket;
 		guint32 new_ssrc = mountpoint->ssrc[stream_type];
 
-		//g_print("sender_ssrc: %08X, receiver: %08X; to_fix: %08X\n", janus_rtcp_get_sender_ssrc(buf, len), janus_rtcp_get_receiver_ssrc(buf, len), new_ssrc);
+		//g_print("PLI sender_ssrc: %08X, receiver: %08X; to_fix: %08X\n", janus_rtcp_get_sender_ssrc(buf, len), janus_rtcp_get_receiver_ssrc(buf, len), new_ssrc);
 		janus_rtcp_fix_ssrc(NULL, buf, len, 1, new_ssrc, new_ssrc);
 
 		if (g_socket_send(sock_rtcp_cli, buf, len, NULL, NULL) < 0) {
@@ -3286,7 +3299,7 @@ static void *janus_streaming_handler(void *data) {
 				g_strlcat(sdptemp, "a=sendonly\r\n", 2048);
 			}
 			sdp = g_strdup(sdptemp);
-			JANUS_LOG(LOG_VERB, "Going to offer this SDP:\n%s\n", sdp);
+			JANUS_LOG(LOG_ERR, "Going to offer this SDP:\n%s\n", sdp);
 			result = json_object();
 			json_object_set_new(result, "status", json_string("preparing"));
 		} else if(!strcasecmp(request_text, "start")) {
