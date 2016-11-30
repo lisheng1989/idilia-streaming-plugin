@@ -359,19 +359,8 @@ typedef struct janus_streaming_mountpoint {
 	socket_utils_socket socket[JANUS_STREAMING_STREAM_MAX][JANUS_STREAMING_SOCKET_MAX];
 	janus_streaming_socket_cbk_data rtp_cbk_data[JANUS_STREAMING_STREAM_MAX];
 	guint32 ssrc[JANUS_STREAMING_STREAM_MAX];
+	GstCaps *caps;
 } janus_streaming_mountpoint;
-
-typedef struct {
-    janus_streaming_mountpoint * mountpoint;
-    GstElement * pipeline;
-} pipeline_callback_t;
-
-typedef struct {
-
-	gchar *id;
-	guint latency;
-	gchar *uri;
-} pipeline_data_t;
 
 GHashTable *mountpoints;
 static GList *old_mountpoints;
@@ -396,29 +385,8 @@ gboolean janus_streaming_send_rtp_src_received(GSocket *socket, GIOCondition con
 static void janus_streaming_close_mountpoint(janus_streaming_mountpoint *mountpoint);
 static void janus_streaming_close_mountpoint_event(janus_streaming_mountpoint *mountpoint);
 static void janus_streaming_relay_rtp_packet(gpointer data, gpointer user_data);
+static void janus_create_offer_sdp();
 
-
-
-static GstElement * 
-create_remote_rtp_output(guint port, const gchar * media);
-static GstElement * 
-create_remote_rtcp_input(const gchar * media, GSocket *socket);
-static void sender_bin_add_media_pads_to_rtpbin(GstElement * bin, guint pad_id, const gchar * media);
-static GstElement * sender_bin_create(void);
-
-static void link_rtp_pad_to_sender_bin(GstElement * source, GstPad * input_pad, const gchar *media, pipeline_callback_t * callback_data);
-
-void
-rtspsrc_on_no_more_pads (GstElement *element, pipeline_callback_t * callback_data);
-
-
-static void
-rtspsrc_pad_added_callback(GstElement * element, GstPad * pad, pipeline_callback_t * callback_data);
-
-static GstElement * create_rtsp_source_element(gpointer user_data, const pipeline_data_t * pipeline_data);
-
-static GstElement *
-create_videotestsrc_bin (gpointer user_data, const pipeline_data_t * pipeline_data);
 
 
 typedef struct janus_streaming_message {
@@ -479,6 +447,42 @@ typedef struct janus_streaming_rtp_relay_packet {
 	uint32_t timestamp;
 	uint16_t seq_number;
 } janus_streaming_rtp_relay_packet;
+
+
+typedef struct {
+    janus_streaming_mountpoint * mountpoint;
+    GstElement * pipeline;
+} pipeline_callback_t;
+
+typedef struct {
+
+	gchar *id;
+	guint latency;
+	gchar *uri;
+} pipeline_data_t;
+
+
+
+static GstElement * 
+create_remote_rtp_output(guint port, const gchar * media);
+static GstElement * 
+create_remote_rtcp_input(const gchar * media, GSocket *socket);
+static void sender_bin_add_media_pads_to_rtpbin(GstElement * bin, guint pad_id, const gchar * media);
+static GstElement * sender_bin_create(void);
+
+static void link_rtp_pad_to_sender_bin(GstElement * source, GstPad * input_pad, const gchar *media, pipeline_callback_t * callback_data);
+
+void
+rtspsrc_on_no_more_pads (GstElement *element, pipeline_callback_t * callback_data);
+
+
+static void
+rtspsrc_pad_added_callback(GstElement * element, GstPad * pad, pipeline_callback_t * callback_data);
+
+static GstElement * create_rtsp_source_element(gpointer user_data, const pipeline_data_t * pipeline_data);
+
+static GstElement *
+create_videotestsrc_bin (gpointer user_data, const pipeline_data_t * pipeline_data);
 
 
 /* Error codes */
@@ -702,6 +706,7 @@ static json_t *json_registry_source_request(const gchar *url) {
 	return json_object_response;
 }
 
+
 static gchar *get_source_from_registry_by_id(const gchar *registry_url, const gchar *id) {
 
 	gchar *url = NULL;
@@ -815,386 +820,6 @@ static json_t *json_janus_request(const gchar *command) {
 	return json_object_request;
 }
 
-static gboolean message_mountpoint_create_request(json_t *request, gpointer data) {
-
-	janus_streaming_mountpoint *mountpoint = (janus_streaming_mountpoint *)data;
-	json_t *json_object_body = NULL;
-	gboolean return_value = TRUE;
-
-	do {
-		if (!request) {
-			JANUS_LOG(LOG_ERR, "Imput parameter request was null.\n");
-			return_value = FALSE;
-			break;
-		}
-		if (!mountpoint) {
-			JANUS_LOG(LOG_ERR, "Input parameter data was null.\n");
-			return_value = FALSE;
-			break;
-		}
-		if (!mountpoint->source) {
-			JANUS_LOG(LOG_ERR, "Invalid input parameter data.\n");
-			return_value = FALSE;
-			break;
-		}
-		// allocation
-		json_object_body = json_object();
-		if (!json_object_body) {
-			JANUS_LOG(LOG_ERR, "Could not get json object.\n");
-			return_value = FALSE;
-			break;
-		}
-		if (json_object_set_new(json_object_body, "request", json_string("create"))) {
-			JANUS_LOG(LOG_ERR, "Could not set request json string.\n");
-			return_value = FALSE;
-			break;
-		}
-		if (json_object_set_new(json_object_body, "id", json_string(mountpoint->id))) {
-			JANUS_LOG(LOG_ERR, "Could not set id json string.\n");
-			return_value = FALSE;
-			break;
-		}
-		if (json_object_set_new(json_object_body, "type", json_string("rtp"))) {
-			JANUS_LOG(LOG_ERR, "Could not set type json string.\n");
-			return_value = FALSE;
-			break;
-		}
-		if (json_object_set_new(json_object_body, "audio", json_boolean(TRUE))) {
-			JANUS_LOG(LOG_ERR, "Could not set audio json boolean.\n");
-			return_value = FALSE;
-			break;
-		}
-		if (json_object_set_new(json_object_body, "audioport",
-			json_integer(((janus_streaming_rtp_source *)mountpoint->source)->audio_port))) {
-			JANUS_LOG(LOG_ERR, "Could not set audioport json integer.\n");
-			return_value = FALSE;
-			break;
-		}
-		if (json_object_set_new(json_object_body, "audiopt", json_integer(111))) {
-			JANUS_LOG(LOG_ERR, "Could not set audiopt json integer.\n");
-			return_value = FALSE;
-			break;
-		}
-		if (json_object_set_new(json_object_body, "audiortpmap", json_string("opus/48000/2"))) {
-			JANUS_LOG(LOG_ERR, "Could not set audiortpmap json string.\n");
-			return_value = FALSE;
-			break;
-		}
-		if (json_object_set_new(json_object_body, "video", json_boolean(TRUE))) {
-			JANUS_LOG(LOG_ERR, "Could not set video json boolean.\n");
-			return_value = FALSE;
-			break;
-		}
-		if (json_object_set_new(json_object_body, "videoport",
-			json_integer(((janus_streaming_rtp_source *)mountpoint->source)->video_port))) {
-			JANUS_LOG(LOG_ERR, "Could not set videoport json integer.\n");
-			return_value = FALSE;
-			break;
-		}
-		if (json_object_set_new(json_object_body, "videopt", json_integer(96))) {
-			JANUS_LOG(LOG_ERR, "Could not set videopt json integer.\n");
-			return_value = FALSE;
-			break;
-		}
-		if (json_object_set_new(json_object_body, "videortpmap",
-#if SUPPORTED_CODEC == JANUS_STREAMING_VP8
-			json_string("VP8/90000"))) {
-#else
-			json_string("H264/90000"))) {
-#endif
-			JANUS_LOG(LOG_ERR, "Could not set videortpmap json string.\n");
-			return_value = FALSE;
-			break;
-		}
-		if (json_object_set_new(json_object_body, "is_private",
-			json_boolean(mountpoint->is_private))) {
-			JANUS_LOG(LOG_ERR, "Could not set is_private json boolean.\n");
-			return_value = FALSE;
-			break;
-		}
-		if (json_object_set_new(request, "body", json_object_body)) {
-			JANUS_LOG(LOG_ERR, "Could not set body json object.\n");
-			return_value = FALSE;
-			break;
-		}
-	}
-	while(0);
-
-	// cleanup
-	if (!return_value) {
-		if (json_object_body) {
-			json_decref(json_object_body);
-			json_object_body = NULL;
-		}
-	}
-
-	return return_value;
-}
-
-static gboolean message_mountpoint_create_response(json_t *response, gpointer data) {
-	
-	janus_streaming_mountpoint *mountpoint = (janus_streaming_mountpoint *)data;
-	gboolean return_value = TRUE;
-
-	do {
-		if (!response) {
-			JANUS_LOG(LOG_ERR, "Input parameter response was null.\n");
-			return_value = FALSE;
-			break;
-		}
-		if (!mountpoint) {
-			JANUS_LOG(LOG_ERR, "Input parameter data was null.\n");
-			return_value = FALSE;
-			break;
-		}
-		if (!mountpoint->source) {
-			JANUS_LOG(LOG_ERR, "Invalid input parameter data.\n");
-			return_value = FALSE;
-			break;
-		}
-		json_t *json_object_plugindata = json_object_get(response, "plugindata");
-		if (!json_is_object(json_object_plugindata)) {
-			JANUS_LOG(LOG_ERR, "Could not get plugin data json object.\n");
-			return_value = FALSE;
-			break;
-		}
-		json_t *json_object_data = json_object_get(json_object_plugindata, "data");
-		if (!json_is_object(json_object_data)) {
-			JANUS_LOG(LOG_ERR, "Could not get data json object.\n");
-			return_value = FALSE;
-			break;
-		}
-		json_t *json_object_stream = json_object_get(json_object_data, "stream");
-		if (!json_is_object(json_object_stream)) {
-			JANUS_LOG(LOG_ERR, "Could not get stream json object.\n");
-			return_value = FALSE;
-			break;
-		}
-	}
-	while(0);
-
-	return return_value;
-}
-
-static gboolean message_mountpoint_destroy_request(json_t *request, gpointer data) {
-	
-	janus_streaming_mountpoint *mountpoint = (janus_streaming_mountpoint *)data;
-	json_t *json_object_body = NULL;
-	gboolean return_value = TRUE;
-
-	do {
-		if (!request) {
-			JANUS_LOG(LOG_ERR, "Imput parameter request was null.\n");
-			return_value = FALSE;
-			break;
-		}
-		if (!mountpoint) {
-			JANUS_LOG(LOG_ERR, "Input parameter data was null.\n");
-			return_value = FALSE;
-			break;
-		}
-		if (!mountpoint->source) {
-			JANUS_LOG(LOG_ERR, "Invalid input parameter data.\n");
-			return_value = FALSE;
-			break;
-		}
-		// allocation
-		json_object_body = json_object();		
-		if (!json_object_body) {
-			JANUS_LOG(LOG_ERR, "Could not get json object.\n");
-			return_value = FALSE;
-			break;
-		}
-		if (json_object_set_new(json_object_body, "request", json_string("destroy"))) {
-			JANUS_LOG(LOG_ERR, "Could not set request json string.\n");
-			return_value = FALSE;
-			break;
-		}
-		if (json_object_set_new(json_object_body, "id", json_string(mountpoint->id))) {
-			JANUS_LOG(LOG_ERR, "Could not set id json string.\n");
-			return_value = FALSE;
-			break;
-		}
-		if (json_object_set_new(request, "body", json_object_body)) {
-			JANUS_LOG(LOG_ERR, "Could not set body json object.\n");
-			return_value = FALSE;
-			break;
-		}
-	}
-	while(0);
-
-	// cleanup
-	if (!return_value) {
-		if (json_object_body) {
-			json_decref(json_object_body);
-			json_object_body = NULL;
-		}
-	}
-
-	return return_value;
-}
-
-static CURLcode curl_easy_streaming_plugin_message(CURL *curl_handle, const gchar *janus_url,
-													gboolean (*message_request_cb)(json_t *request, gpointer data),
-													gboolean (*message_response_cb)(json_t *response, gpointer data),
-													gpointer data) {
-
-	json_t *json_object_request = NULL;
-	json_t *json_object_response = NULL;
-	json_t *json_object_data = NULL;
-	json_t *json_object_plugin_handle_id = NULL;
-	gchar *url = NULL;
-	CURLcode return_value = CURLE_OK;
-	guint64 session_id = 0;
-	guint64 plugin_handle_id = 0;
-
-	do
-	{
-		// allocation
-		// create request
-		json_object_request = json_janus_request("create");
-		if (!json_object_request) {
-			JANUS_LOG(LOG_ERR, "Could not initiate create janus request.\n");
-			break;
-		}
-		return_value = curl_easy_post_json_request(curl_handle, janus_url, json_object_request, &json_object_response);
-		json_decref(json_object_request);
-		json_object_request = NULL;
-		if (CURLE_OK != return_value) {
-			JANUS_LOG(LOG_ERR, "Failed to post json request (error=%u).\n", return_value);
-			break;
-		}
-
-		// handle response
-		json_object_data = json_object_get(json_object_response, "data");
-		if (!json_is_object(json_object_data)) {
-			JANUS_LOG(LOG_ERR, "Could not get data json object from the response.\n");
-			break;
-		}
-		json_t *json_object_session_id = json_object_get(json_object_data, "id");
-		if (!json_is_integer(json_object_session_id)) {
-			JANUS_LOG(LOG_ERR, "Could not get integer session id from the data.\n");
-			break;
-		}
-		session_id = json_integer_value(json_object_session_id);
-		// allocation
-		url = g_strdup_printf("%s/%"SCNu64, janus_url, session_id);
-		json_decref(json_object_response);
-		json_object_response = NULL;
-
-		// allocation
-		// attach request
-		json_object_request = json_janus_request("attach");
-		if (!json_object_request) {
-			JANUS_LOG(LOG_ERR, "Could not initiate attach janus request.\n");
-			break;
-		}
-		if (json_object_set_new(json_object_request, "plugin", json_string(JANUS_STREAMING_PACKAGE))) {
-			JANUS_LOG(LOG_ERR, "Could not set object plugin with json string in the json request.\n");
-			break;
-		}
-		return_value = curl_easy_post_json_request(curl_handle, url, json_object_request, &json_object_response);		
-		g_free(url);
-		url = NULL;
-		json_decref(json_object_request);
-		json_object_request = NULL;
-		if (CURLE_OK != return_value) {
-			JANUS_LOG(LOG_ERR, "Failed to post json request (error=%u).\n", return_value);
-			break;
-		}
-
-		// handle response
-		json_object_data = json_object_get(json_object_response, "data");
-		if (!json_is_object(json_object_data)) {
-			JANUS_LOG(LOG_ERR, "Could not get data json object from the response.\n");
-			break;
-		}
-		json_t *json_object_plugin_handle_id = json_object_get(json_object_data, "id");
-		if (!json_is_integer(json_object_plugin_handle_id)) {
-			JANUS_LOG(LOG_ERR, "Could not get integer session id from the data.\n");
-			break;
-		}
-		plugin_handle_id = json_integer_value(json_object_plugin_handle_id);
-		// allocation
-		url = g_strdup_printf("%s/%"SCNu64"/%"SCNu64, janus_url, session_id, plugin_handle_id);
-		json_decref(json_object_response);
-		json_object_response = NULL;
-
-		// allocation
-		// message request
-		json_object_request = json_janus_request("message");
-		if (!json_object_request) {
-			JANUS_LOG(LOG_ERR, "Could not initiate message janus request.\n");
-			break;
-		}
-		if (message_request_cb) {
-			if (!message_request_cb(json_object_request, data)) {
-				JANUS_LOG(LOG_ERR, "Could not send janus request.\n");
-				break;
-			}
-		}
-		return_value = curl_easy_post_json_request(curl_handle, url, json_object_request, &json_object_response);
-		g_free(url);
-		url = NULL;
-		json_decref(json_object_request);
-		json_object_request = NULL;
-		if (CURLE_OK != return_value) {		
-			JANUS_LOG(LOG_ERR, "Failed to post json request (error=%u).\n", return_value);
-			break;
-		}
-		// handle response
-		if (message_response_cb) {
-			if (!message_response_cb(json_object_response, data)) {
-				JANUS_LOG(LOG_ERR, "Could not handle janus response.\n");
-				break;
-			}
-		}
-		json_decref(json_object_response);
-		json_object_response = NULL;
-
-		// create detach request
-		json_object_request = json_janus_request("detach");
-		if (!json_object_request) {
-			JANUS_LOG(LOG_ERR, "Could not initiate dettach janus request.\n");
-			break;
-		}
-		if (json_object_set_new(json_object_request, "plugin", json_string(JANUS_STREAMING_PACKAGE))) {
-			JANUS_LOG(LOG_ERR, "Could not set object plugin with json string in the json request.\n");
-			break;
-		}
-		// allocation
-		url = g_strdup_printf("%s/%"SCNu64"/%"SCNu64, janus_url, session_id, plugin_handle_id);
-		return_value = curl_easy_post_json_request(curl_handle, url, json_object_request, &json_object_response);
-		g_free(url);
-		url = NULL;		
-		if (CURLE_OK != return_value) {		
-			JANUS_LOG(LOG_ERR, "Failed to post json request (error=%u).\n", return_value);
-			break;
-		}
-	} while (0);
-
-	// cleanup
-	if (json_object_request) {	
-		json_decref(json_object_request);
-		json_object_request = NULL;
-	}
-	if (json_object_response) {
-		json_decref(json_object_response);
-		json_object_response = NULL;
-	}
-	if (json_object_plugin_handle_id) {
-		json_decref(json_object_plugin_handle_id);
-		json_object_plugin_handle_id = NULL;
-	}
-	if (url) {
-		g_free(url);
-		url = NULL;
-	}
-
-	return return_value;
-}
-
-
 
 static void teardown_pipeline(janus_streaming_mountpoint *mountpoint) {
 
@@ -1216,21 +841,7 @@ static void teardown_pipeline(janus_streaming_mountpoint *mountpoint) {
 			}
 			g_main_loop_quit(main_loop);
 		}
-		janus_mutex_unlock(&transcode_main_loops_mutex);
-		// allocation		
-		curl_handle = curl_easy_init();
-		if (!curl_handle) {
-			JANUS_LOG(LOG_ERR, "Could not initialize curl.\n");
-		}
-		else {
-			CURLcode  curl_code = curl_easy_streaming_plugin_message(curl_handle, janus_endpoint, message_mountpoint_destroy_request,
-																	NULL, mountpoint);
-			if (CURLE_OK != curl_code) {
-				JANUS_LOG(LOG_ERR, "Failed to destroy mountpoint.\n");
-			}
-			curl_easy_cleanup(curl_handle);
-			curl_handle = NULL;
-		}
+		janus_mutex_unlock(&transcode_main_loops_mutex);	
 
 		for (int stream = 0; stream < JANUS_STREAMING_STREAM_MAX; stream++) {
 			for (int j = 0; j < JANUS_STREAMING_SOCKET_MAX; j++) {
@@ -1254,7 +865,7 @@ static gboolean on_eos(GstBus *bus, GstMessage *message, gpointer data)
 	janus_mutex_lock(&mountpoints_mutex);
 	janus_streaming_mountpoint *mp = g_hash_table_lookup(mountpoints, id);
 	janus_mutex_unlock(&mountpoints_mutex);
-	teardown_pipeline(mp);
+	
 	return TRUE;
 }
 
@@ -1272,18 +883,65 @@ static gboolean on_error(GstBus *bus, GstMessage *message, gpointer data)
 	return TRUE;
 }
 
+static gboolean print_field (GQuark field, const GValue * value, gpointer pfx) {
+  gchar *str = gst_value_serialize (value);
+  
+  g_print ("  %15s: %s\n" , g_quark_to_string (field), str);
+  g_free (str);
+  return TRUE;
+}
+
+
+
+
 static GstElement * 
 create_remote_rtp_output(guint port, const gchar * media)
 {
-    GstElement * udpsink;
-
+    GstElement * udpsink, *filter;
+	GstCaps *filtercaps;
+	GstBin *sinkbin;
+	GstPad * pad, *pad1;
+	sinkbin = gst_bin_new (NULL);
+  
     gchar *name = g_strdup_printf("rtp_sink_%s", media);
+	JANUS_LOG(LOG_INFO,"\ncreate_remote_rtp_output  name sink %s\n",name);
     udpsink = gst_element_factory_make ("udpsink", name);
     g_assert (udpsink);
     g_object_set (G_OBJECT (udpsink), "port", port, NULL);
+	
+	filter = gst_element_factory_make ("capsfilter", "filter");
+	g_assert (filter != NULL); 
+
+	gst_bin_add_many (GST_BIN (sinkbin),  filter, udpsink, NULL);
+	gst_element_link (filter, udpsink);
+			
+
+	filtercaps = gst_caps_new_simple ( "application/x-rtp",
+               "clock-rate", G_TYPE_INT, 90000, NULL);
+
+	g_object_set (G_OBJECT (filter), "caps", filtercaps, NULL);
+
+	pad = gst_element_get_static_pad (udpsink, name);
+	//g_assert (pad != NULL);
+
+	JANUS_LOG(LOG_INFO,"\nadd pad\n");
+	//if(gst_pad_is_linked(pad) == FALSE){
+		//pad = gst_element_get_static_pad (udpsink, "sink");
+		//g_assert (pad != NULL);
+		JANUS_LOG(LOG_INFO,"\nadd pad\n");
+		if(gst_element_add_pad (sinkbin,gst_ghost_pad_new ("sink", pad)) != TRUE){
+			JANUS_LOG(LOG_INFO,"gst_element_add_pad failed \n");
+		}
+		/*if(gst_pad_set_active(pad,TRUE) != TRUE){
+			JANUS_LOG(LOG_INFO,"gst_pad_set_active failed \n");
+		}*/
+		 gst_object_unref (GST_OBJECT (pad));
+	//}
+
+    gst_caps_unref (filtercaps);
     g_free(name);
 
-    return udpsink;
+    return sinkbin;
 }
 
 static GstElement * 
@@ -1295,7 +953,7 @@ create_remote_rtcp_input(const gchar * media, GSocket *socket)
     udpsrc = gst_element_factory_make ("udpsrc", name);
     g_assert (udpsrc);
     g_object_set(udpsrc, "socket", socket, NULL);
-	g_object_set(udpsrc, "close-socket", FALSE, NULL);
+	g_object_set(udpsrc, "close-socket", FALSE, NULL);	
     g_free(name);
 
     return udpsrc;
@@ -1323,7 +981,7 @@ static void sender_bin_add_media_pads_to_rtpbin(GstElement * bin, guint pad_id, 
 
     gst_element_add_pad (bin, gst_ghost_pad_new (sinkpad_name, rtpbin_send_rtp_sink_pad));
     gst_object_unref (rtpbin_send_rtp_sink_pad);
-
+	
     rtpbin_send_rtp_src_pad = gst_element_get_static_pad (rtpbin, rtpbin_srcpad_name);
     g_assert(rtpbin_send_rtp_src_pad);
 
@@ -1357,7 +1015,7 @@ static GstElement * sender_bin_create (void)
 
     g_object_set (G_OBJECT (rtpbin), "rtp-profile", 3, NULL);
     g_object_set (G_OBJECT (rtpbin), "latency",  0, NULL);
-
+	
     gst_bin_add_many (GST_BIN (bin), rtpbin, NULL);
 
     sender_bin_add_media_pads_to_rtpbin(bin, 0, "video");
@@ -1367,9 +1025,11 @@ static GstElement * sender_bin_create (void)
 }
 
 
+
 static void link_rtp_pad_to_sender_bin(GstElement * source, GstPad * input_pad, const gchar *media, pipeline_callback_t * callback_data)
 {
-    GstElement *output_bin = NULL, * sender_bin, *rtcp_src;
+
+    GstElement *udp_sink_bin = NULL, * sender_bin, *rtcp_src;
     gchar * sinkpad_name, *srcpad_name, *rtcp_sinkpad_name;
     GstElement * pipeline = callback_data->pipeline;
     gint stream_type;
@@ -1389,14 +1049,15 @@ static void link_rtp_pad_to_sender_bin(GstElement * source, GstPad * input_pad, 
       return;
     }
 
-    output_bin = create_remote_rtp_output(callback_data->mountpoint->socket[stream_type][JANUS_STREAMING_SOCKET_RTP_SRV].port, media);
-    g_assert(output_bin);
+    udp_sink_bin = create_remote_rtp_output(callback_data->mountpoint->socket[stream_type][JANUS_STREAMING_SOCKET_RTP_SRV].port, media);
+    g_assert(udp_sink_bin);
 
     rtcp_src = create_remote_rtcp_input(media, callback_data->mountpoint->socket[stream_type][JANUS_STREAMING_SOCKET_RTCP_RCV_SRV].socket);
     g_assert(rtcp_src);
 
-    gst_bin_add_many (GST_BIN (pipeline), output_bin, rtcp_src, NULL);
-    g_assert (gst_element_set_state (output_bin, GST_STATE_PLAYING) != GST_STATE_CHANGE_FAILURE);
+    gst_bin_add_many (GST_BIN (pipeline), udp_sink_bin, rtcp_src, NULL);
+
+    g_assert (gst_element_set_state (udp_sink_bin, GST_STATE_PLAYING) != GST_STATE_CHANGE_FAILURE);
 
     sinkpad_name = g_strdup_printf("%s_sink", media);
     srcpad_name = g_strdup_printf("%s_src", media);
@@ -1408,9 +1069,9 @@ static void link_rtp_pad_to_sender_bin(GstElement * source, GstPad * input_pad, 
     senderbin_srcpad = gst_element_get_static_pad (sender_bin, srcpad_name);
     g_assert(senderbin_srcpad);
 
-    output_sinkpad = gst_element_get_static_pad (output_bin, "sink");
+    output_sinkpad = gst_element_get_static_pad (udp_sink_bin, "sink");	
     g_assert(output_sinkpad);
-
+  
     senderbin_rtcp_sinkpad = gst_element_get_static_pad (sender_bin, rtcp_sinkpad_name);
     g_assert(senderbin_rtcp_sinkpad);
 
@@ -1434,8 +1095,10 @@ rtspsrc_on_no_more_pads (GstElement *element, pipeline_callback_t * callback_dat
 {
     GstElement * pipeline = callback_data->pipeline;
     g_assert(GST_IS_PIPELINE(pipeline));
+	janus_create_offer_sdp();
     GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(pipeline), GST_DEBUG_GRAPH_SHOW_STATES, "pipeline");
 }
+
 
 static void
 rtspsrc_pad_added_callback(GstElement * element, GstPad * pad, pipeline_callback_t * callback_data)
@@ -1453,6 +1116,8 @@ rtspsrc_pad_added_callback(GstElement * element, GstPad * pad, pipeline_callback
 
     if (caps != NULL) {
         s = gst_caps_get_structure (caps, 0);
+
+		//gst_structure_foreach(s,print_field,NULL);
 
         type = gst_structure_get_name(s);
 
@@ -1491,8 +1156,8 @@ static GstElement * create_rtsp_source_element(gpointer user_data, const pipelin
   g_object_set (G_OBJECT (source), 
       "location", pipeline_data->uri,
       "latency",  pipeline_data->latency, 
-      "async-handling", TRUE, 
-      NULL);
+      "async-handling", TRUE, NULL);
+  
 
   g_signal_connect(source, "pad-added",    (GCallback) rtspsrc_pad_added_callback, user_data);
   g_signal_connect(source, "no-more-pads", (GCallback) rtspsrc_on_no_more_pads,    user_data);
@@ -1524,6 +1189,7 @@ create_videotestsrc_bin (gpointer user_data, const pipeline_data_t * pipeline_da
   g_object_set (G_OBJECT (payloader), 
       "pt", 96,
       NULL);
+  	  
 
   gst_bin_add_many (GST_BIN (bin), source, converter, encoder, payloader, NULL);
 
@@ -1755,12 +1421,6 @@ static void setup_pipeline(const gchar *id) {
 			break;
 		}
 
-		// allocation
-		curl_handle = curl_easy_init();
-		if (!curl_handle) {
-			JANUS_LOG(LOG_ERR, "Could not initialize curl.\n");
-			break;
-		}
 
 		// allocation
 		rtp_source = g_malloc0(sizeof(janus_streaming_rtp_source));
@@ -1778,23 +1438,12 @@ static void setup_pipeline(const gchar *id) {
 		mountpoint->id = g_strdup(id);
 		mountpoint->is_private = FALSE;
 
-		CURLcode curl_code = curl_easy_streaming_plugin_message(curl_handle, janus_endpoint, message_mountpoint_create_request,
-																message_mountpoint_create_response, mountpoint);
-
 		g_free(mountpoint->id);
 		mountpoint->id = NULL;
 		g_free(mountpoint->source);
 		mountpoint->source = NULL;
 		g_free(mountpoint);
 		mountpoint = NULL;
-		// cleanup curl
-		curl_easy_cleanup(curl_handle);
-		curl_handle = NULL;
-
-		if (CURLE_OK != curl_code) {
-			JANUS_LOG(LOG_ERR, "Could not create mountpoint.\n");
-			break;
-		}
 
 		// allocation - deallocated within the thread
 		pipeline_data_t *pipeline_data = g_malloc0(sizeof(pipeline_data_t));
@@ -2154,7 +1803,7 @@ int janus_streaming_init(janus_callbacks *callback, const char *config_path) {
 	g_hash_table_iter_init(&iter, mountpoints);
 	while (g_hash_table_iter_next(&iter, NULL, &value)) {
 		janus_streaming_mountpoint *mp = value;
-		JANUS_LOG(LOG_VERB, "  ::: [%s][%s] %s (%s, %s, %s, pin: %s)\n", mp->id, mp->name, mp->description,
+		JANUS_LOG(LOG_INFO, "  ::: [%s][%s] %s (%s, %s, %s, pin: %s)\n", mp->id, mp->name, mp->description,
 			mp->streaming_type == janus_streaming_type_live ? "live" : "on demand",
 			mp->streaming_source == janus_streaming_source_rtp ? "RTP source" : "file source",
 			mp->is_private ? "private" : "public",
@@ -2328,16 +1977,20 @@ void janus_streaming_destroy_session(janus_plugin_session *handle, int *error) {
 	if(session->mountpoint) {
 		janus_mutex_lock(&session->mountpoint->mutex);
 		guint old_listeners = g_list_length(session->mountpoint->listeners);
+		JANUS_LOG(LOG_INFO, "Removing listeners... %u\n",old_listeners);
 		session->mountpoint->listeners = g_list_remove_all(session->mountpoint->listeners, session);
-		guint listeners = g_list_length(session->mountpoint->listeners); 
+		guint listeners = g_list_length(session->mountpoint->listeners);
+		JANUS_LOG(LOG_INFO, "Removing listeners... old_listeners %u listeners\n",old_listeners,listeners); 
 		janus_mutex_unlock(&session->mountpoint->mutex);
 		if (old_listeners && !listeners) {
+			JANUS_LOG(LOG_INFO, "teardown... old_listeners %u listeners\n",old_listeners,listeners);
 			teardown_pipeline(session->mountpoint);
 		}
 	}
-	janus_mutex_lock(&sessions_mutex);
+	janus_mutex_lock(&sessions_mutex);	
 	if(!session->destroyed) {
 		session->destroyed = janus_get_monotonic_time();
+		JANUS_LOG(LOG_INFO, "Removing streaming session... %u\n", sessions);
 		g_hash_table_remove(sessions, handle);
 		/* Cleaning up and removing the session is done in a lazy way */
 		old_sessions = g_list_append(old_sessions, session);
@@ -2592,31 +2245,28 @@ struct janus_plugin_result *janus_streaming_handle_message(janus_plugin_session 
 			}
 			if(id == NULL) {
 				JANUS_LOG(LOG_VERB, "Missing id, will generate a random one...\n");
-			} else {
+			} else {				
+				JANUS_LOG(LOG_ERR, "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
 				janus_mutex_lock(&mountpoints_mutex);
 				mp = g_hash_table_lookup(mountpoints, json_string_value(id));
 				janus_mutex_unlock(&mountpoints_mutex);
-				if(mp != NULL) {
-					JANUS_LOG(LOG_ERR, "A stream with the provided ID already exists\n");
-					error_code = JANUS_STREAMING_ERROR_CANT_CREATE;
-					g_snprintf(error_cause, 512, "A stream with the provided ID already exists");
-					goto plugin_response;
-				}
-			}
-			JANUS_LOG(LOG_VERB, "Audio %s, Video %s\n", doaudio ? "enabled" : "NOT enabled", dovideo ? "enabled" : "NOT enabled");
-			mp = janus_streaming_create_rtp_source(
-					id ? json_string_value(id) : NULL,
-					name ? (char *)json_string_value(name) : NULL,
-					desc ? (char *)json_string_value(desc) : NULL,
-					doaudio, amcast, aport, acodec, artpmap, afmtp,
-					dovideo, vmcast, vport, vcodec, vrtpmap, vfmtp, bufferkf);
-			if(mp == NULL) {
-				JANUS_LOG(LOG_ERR, "Error creating 'rtp' stream...\n");
-				error_code = JANUS_STREAMING_ERROR_CANT_CREATE;
-				g_snprintf(error_cause, 512, "Error creating 'rtp' stream");
-				goto plugin_response;
-			}
-			mp->is_private = is_private ? json_is_true(is_private) : FALSE;
+				if(mp == NULL) {					
+					JANUS_LOG(LOG_ERR, "Audio %s, Video %s\n", doaudio ? "enabled" : "NOT enabled", dovideo ? "enabled" : "NOT enabled");
+					mp = janus_streaming_create_rtp_source(
+							id ? json_string_value(id) : NULL,
+							name ? (char *)json_string_value(name) : NULL,
+							desc ? (char *)json_string_value(desc) : NULL,
+							doaudio, amcast, aport, acodec, artpmap, afmtp,
+							dovideo, vmcast, vport, vcodec, vrtpmap, vfmtp, bufferkf);
+					if(mp == NULL) {
+						JANUS_LOG(LOG_ERR, "Error creating 'rtp' stream...\n");
+						error_code = JANUS_STREAMING_ERROR_CANT_CREATE;
+						g_snprintf(error_cause, 512, "Error creating 'rtp' stream");
+						goto plugin_response;
+					}
+					mp->is_private = is_private ? json_is_true(is_private) : FALSE;
+				}			
+			}	
 		} else {
 			JANUS_LOG(LOG_ERR, "Unknown stream type '%s'...\n", type_text);
 			error_code = JANUS_STREAMING_ERROR_INVALID_ELEMENT;
@@ -2711,13 +2361,14 @@ struct janus_plugin_result *janus_streaming_handle_message(janus_plugin_session 
 			goto plugin_response;
 		}
 		const gchar *id_value = json_string_value(id);
+		JANUS_LOG(LOG_INFO, "\nmountpoint/stream %s ~!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n", id_value);
 		janus_mutex_lock(&mountpoints_mutex);
 		janus_streaming_mountpoint *mp = g_hash_table_lookup(mountpoints, id_value);
 		if(mp == NULL) {
 			janus_mutex_unlock(&mountpoints_mutex);
-			JANUS_LOG(LOG_VERB, "No such mountpoint/stream %s\n", id_value);
+			JANUS_LOG(LOG_INFO, "No such mountpoint/stream %s ~!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n", id_value);
 			error_code = JANUS_STREAMING_ERROR_NO_SUCH_MOUNTPOINT;
-			g_snprintf(error_cause, 512, "No such mountpoint/stream %s", id_value);
+			g_snprintf(error_cause, 512, "No such mountpoint/stream %s !!!!!!!!!!!!!!!!!!!!!!!!!!!!1", id_value);
 			goto plugin_response;
 		}
 		/* A secret may be required for this action */
@@ -2879,6 +2530,7 @@ struct janus_plugin_result *janus_streaming_handle_message(janus_plugin_session 
 			json_object_set_new(response, "streaming", json_string("ok"));
 			goto plugin_response;
 		} else if(!strcasecmp(action_text, "stop")) {
+			JANUS_LOG(LOG_INFO, "STOP request !!!!!!!!\n");
 			/* Stop the recording */
 			JANUS_VALIDATE_JSON_OBJECT(root, recording_stop_parameters,
 				error_code, error_cause, TRUE,
@@ -2982,6 +2634,7 @@ struct janus_plugin_result *janus_streaming_handle_message(janus_plugin_session 
 	} else if(!strcasecmp(request_text, "watch") || !strcasecmp(request_text, "start")
 			|| !strcasecmp(request_text, "pause") || !strcasecmp(request_text, "stop")
 			|| !strcasecmp(request_text, "switch")) {
+		JANUS_LOG(LOG_VERB, "/* These messages are handled asynchronously */ \n");
 		/* These messages are handled asynchronously */
 		janus_streaming_message *msg = g_malloc0(sizeof(janus_streaming_message));
 		msg->handle = handle;
@@ -3127,6 +2780,18 @@ void janus_streaming_hangup_media(janus_plugin_session *handle) {
 		return;
 	if(g_atomic_int_add(&session->hangingup, 1))
 		return;
+
+	if(session->mountpoint != NULL){
+		JANUS_LOG(LOG_INFO, "\n mountpoint \n");
+	
+	janus_streaming_session *session = NULL;
+		janus_mutex_lock(&sessions_mutex);
+		session == g_hash_table_lookup(sessions, session);					
+		janus_mutex_unlock(&sessions_mutex);
+		if(!session) {
+			JANUS_LOG(LOG_ERR, "No session associated with this handle...\n");
+		}
+	}
 	/* FIXME Simulate a "stop" coming from the browser */
 	janus_streaming_message *msg = g_malloc0(sizeof(janus_streaming_message));
 	msg->handle = handle;
@@ -3191,6 +2856,7 @@ static void *janus_streaming_handler(void *data) {
 		char *sdp = NULL;
 		/* All these requests can only be handled asynchronously */
 		if(!strcasecmp(request_text, "watch")) {
+			JANUS_LOG(LOG_INFO, "watch !!!!!!!!!!!!!!!!!!!!!\n");
 			JANUS_VALIDATE_JSON_OBJECT(root, id_parameters,
 				error_code, error_cause, TRUE,
 				JANUS_STREAMING_ERROR_MISSING_ELEMENT, JANUS_STREAMING_ERROR_INVALID_ELEMENT);
@@ -3200,11 +2866,11 @@ static void *janus_streaming_handler(void *data) {
 			const gchar *id_value = json_string_value(id);
 			janus_mutex_lock(&mountpoints_mutex);
 			janus_streaming_mountpoint *mp = g_hash_table_lookup(mountpoints, id_value);
-			if(mp == NULL) {
+			if(mp->active == FALSE){			
+				JANUS_LOG(LOG_ERR, "Mountpoint/stream already used id: %s\n", id_value);
 				janus_mutex_unlock(&mountpoints_mutex);
 				setup_pipeline(id_value);
 				janus_mutex_lock(&mountpoints_mutex);
-				mp = g_hash_table_lookup(mountpoints, id_value);
 				if(mp == NULL) {
 					janus_mutex_unlock(&mountpoints_mutex);
 					JANUS_LOG(LOG_VERB, "No such mountpoint/stream %s\n", id_value);
@@ -3228,7 +2894,8 @@ static void *janus_streaming_handler(void *data) {
 			/* TODO Check if user is already watching a stream, if the video is active, etc. */
 			janus_mutex_lock(&mp->mutex);
 			mp->listeners = g_list_append(mp->listeners, session);
-			janus_mutex_unlock(&mp->mutex);
+			janus_mutex_unlock(&mp->mutex);			
+		
 			sdp_type = "offer";	/* We're always going to do the offer ourselves, never answer */
 			char sdptemp[2048];
 			memset(sdptemp, 0, 2048);
@@ -3241,68 +2908,69 @@ static void *janus_streaming_handler(void *data) {
 					"-", sessid, version);
 			g_strlcat(sdptemp, buffer, 2048);
 			g_strlcat(sdptemp, "s=Streaming Test\r\nt=0 0\r\n", 2048);
-			if(mp->codecs.audio_pt >= 0) {
-				/* Add audio line */
-				g_snprintf(buffer, 512,
-					"m=audio 1 RTP/SAVPF %d\r\n"
-					"c=IN IP4 1.1.1.1\r\n",
-					mp->codecs.audio_pt);
-				g_strlcat(sdptemp, buffer, 2048);
-				if(mp->codecs.audio_rtpmap) {
-					g_snprintf(buffer, 512,
-						"a=rtpmap:%d %s\r\n",
-						mp->codecs.audio_pt, mp->codecs.audio_rtpmap);
-					g_strlcat(sdptemp, buffer, 2048);
-				}
-				if(mp->codecs.audio_fmtp) {
-					g_snprintf(buffer, 512,
-						"a=fmtp:%d %s\r\n",
-						mp->codecs.audio_pt, mp->codecs.audio_fmtp);
-					g_strlcat(sdptemp, buffer, 2048);
-				}
-				g_strlcat(sdptemp, "a=sendonly\r\n", 2048);
-			}
-			if(mp->codecs.video_pt >= 0) {
-				/* Add video line */
-				g_snprintf(buffer, 512,
-					"m=video 1 RTP/SAVPF %d\r\n"
-					"c=IN IP4 1.1.1.1\r\n",
-					mp->codecs.video_pt);
-				g_strlcat(sdptemp, buffer, 2048);
-				if(mp->codecs.video_rtpmap) {
-					g_snprintf(buffer, 512,
-						"a=rtpmap:%d %s\r\n",
-						mp->codecs.video_pt, mp->codecs.video_rtpmap);
-					g_strlcat(sdptemp, buffer, 2048);
-				}
-				if(mp->codecs.video_fmtp) {
-					g_snprintf(buffer, 512,
-						"a=fmtp:%d %s\r\n",
-						mp->codecs.video_pt, mp->codecs.video_fmtp);
-					g_strlcat(sdptemp, buffer, 2048);
-				}
-				g_snprintf(buffer, 512,
-					"a=rtcp-fb:%d nack\r\n",
-					mp->codecs.video_pt);
-				g_strlcat(sdptemp, buffer, 2048);
+			
+			/* Add audio line */
+			g_snprintf(buffer, 512,
+				"m=audio 1 RTP/SAVPF %d\r\n"
+				"c=IN IP4 1.1.1.1\r\n",
+				111);
+			g_strlcat(sdptemp, buffer, 2048);
 
-				g_snprintf(buffer, 512,
-					"a=rtcp-fb:%d nack pli\r\n",
-					mp->codecs.video_pt);
-				g_strlcat(sdptemp, buffer, 2048);
+			g_snprintf(buffer, 512,
+				"a=rtpmap:%d %s\r\n",
+				111, "opus/48000/2");
+			g_strlcat(sdptemp, buffer, 2048);
 
-				g_snprintf(buffer, 512,
-					"a=rtcp-fb:%d goog-remb\r\n",
-					mp->codecs.video_pt);
-				g_strlcat(sdptemp, buffer, 2048);
+			
+			g_snprintf(buffer, 512,
+				"a=fmtp:%d %s\r\n",
+				111, "");
+			g_strlcat(sdptemp, buffer, 2048);
 
-				g_strlcat(sdptemp, "a=sendonly\r\n", 2048);
-			}
-			sdp = g_strdup(sdptemp);
+			g_strlcat(sdptemp, "a=sendonly\r\n", 2048);
+
+			/* Add video line */
+			g_snprintf(buffer, 512,
+				"m=video 1 RTP/SAVPF %d\r\n"
+				"c=IN IP4 1.1.1.1\r\n",
+				96);
+			g_strlcat(sdptemp, buffer, 2048);
+			
+			g_snprintf(buffer, 512,
+				"a=rtpmap:%d %s\r\n",
+				96, "VP8/90000");
+			g_strlcat(sdptemp, buffer, 2048);
+
+
+			g_snprintf(buffer, 512,
+				"a=fmtp:%d %s\r\n",
+				96, "");
+			g_strlcat(sdptemp, buffer, 2048);
+
+			g_snprintf(buffer, 512,
+				"a=rtcp-fb:%d nack\r\n",
+				96);
+			g_strlcat(sdptemp, buffer, 2048);
+
+			g_snprintf(buffer, 512,
+				"a=rtcp-fb:%d nack pli\r\n",
+				96);
+			g_strlcat(sdptemp, buffer, 2048);
+
+			g_snprintf(buffer, 512,
+				"a=rtcp-fb:%d goog-remb\r\n",
+				96);
+			g_strlcat(sdptemp, buffer, 2048);
+
+			g_strlcat(sdptemp, "a=sendonly\r\n", 2048);
+
+			sdp = g_strdup(sdptemp);	
+			
 			JANUS_LOG(LOG_ERR, "Going to offer this SDP:\n%s\n", sdp);
 			result = json_object();
 			json_object_set_new(result, "status", json_string("preparing"));
 		} else if(!strcasecmp(request_text, "start")) {
+			JANUS_LOG(LOG_INFO, "Start !!!!!!!!!!!!!!!!!!1\n");
 			if(session->mountpoint == NULL) {
 				JANUS_LOG(LOG_VERB, "Can't start: no mountpoint set\n");
 				error_code = JANUS_STREAMING_ERROR_NO_SUCH_MOUNTPOINT;
@@ -3315,6 +2983,7 @@ static void *janus_streaming_handler(void *data) {
 			/* We wait for the setup_media event to start: on the other hand, it may have already arrived */
 			json_object_set_new(result, "status", json_string(session->started ? "started" : "starting"));
 		} else if(!strcasecmp(request_text, "pause")) {
+			JANUS_LOG(LOG_INFO, "PAUSE!!!!!!!\n");
 			if(session->mountpoint == NULL) {
 				JANUS_LOG(LOG_VERB, "Can't pause: no mountpoint set\n");
 				error_code = JANUS_STREAMING_ERROR_NO_SUCH_MOUNTPOINT;
@@ -3331,6 +3000,7 @@ static void *janus_streaming_handler(void *data) {
 			 * cannot, for instance, switch from a live RTP mountpoint to
 			 * an on demand one or viceversa (TBD.) */
 			janus_streaming_mountpoint *oldmp = session->mountpoint;
+			JANUS_LOG(LOG_INFO, "Switch !!!!!!!!\n");
 			if(oldmp == NULL) {
 				JANUS_LOG(LOG_VERB, "Can't switch: not on a mountpoint\n");
 				error_code = JANUS_STREAMING_ERROR_NO_SUCH_MOUNTPOINT;
@@ -3387,12 +3057,13 @@ static void *janus_streaming_handler(void *data) {
 			json_object_set_new(result, "switched", json_string("ok"));
 			json_object_set_new(result, "id", json_string(id_value));
 		} else if(!strcasecmp(request_text, "stop")) {
+			JANUS_LOG(LOG_INFO, "Stopping the streaming\n");
 			if(session->stopping || !session->started) {
 				/* Been there, done that: ignore */
 				janus_streaming_message_free(msg);
 				continue;
 			}
-			JANUS_LOG(LOG_VERB, "Stopping the streaming\n");
+			
 			session->stopping = TRUE;
 			session->started = FALSE;
 			session->paused = FALSE;
@@ -3402,7 +3073,7 @@ static void *janus_streaming_handler(void *data) {
 				janus_mutex_lock(&session->mountpoint->mutex);
 				JANUS_LOG(LOG_VERB, "  -- Removing the session from the mountpoint listeners\n");
 				if(g_list_find(session->mountpoint->listeners, session) != NULL) {
-					JANUS_LOG(LOG_VERB, "  -- -- Found!\n");
+					JANUS_LOG(LOG_INFO, "  -- -- Found!\n");
 				}
 				guint old_listeners = g_list_length(session->mountpoint->listeners);
 				session->mountpoint->listeners = g_list_remove_all(session->mountpoint->listeners, session);
@@ -3430,9 +3101,12 @@ static void *janus_streaming_handler(void *data) {
 		}
 
 		/* Prepare JSON event */
+		
 		json_t *jsep = json_pack("{ssss}", "type", sdp_type, "sdp", sdp);
 		json_t *event = json_object();
 		json_object_set_new(event, "streaming", json_string("event"));
+
+		JANUS_LOG(LOG_INFO,"\n Prepare JSON event \n %s \n ",sdp);
 		if(result != NULL)
 			json_object_set_new(event, "result", result);
 		int ret = gateway->push_event(msg->handle, &janus_streaming_plugin, msg->transaction, event, jsep);
@@ -3684,6 +3358,8 @@ gboolean janus_streaming_send_rtp_src_received(GSocket *socket, GIOCondition con
 		packet.seq_number = ntohs(packet.data->seq_number);
 
 		mountpoint->ssrc[JANUS_STREAMING_STREAM_VIDEO] = ntohl(packet.data->ssrc);
+		if(mountpoint->active == FALSE)
+			mountpoint->active = TRUE;
 
 		janus_mutex_lock(&mountpoint->mutex);
 		g_list_foreach(mountpoint->listeners, janus_streaming_relay_rtp_packet, &packet);
@@ -3748,4 +3424,7 @@ static gboolean janus_streaming_create_sockets(socket_utils_socket socket[JANUS_
 	return result;
 }
 
+static void janus_create_offer_sdp(){
+	JANUS_LOG(LOG_INFO,"\njanus_create_offer_sdp\n");
+}
 
