@@ -139,6 +139,7 @@ url = RTSP stream URL (only if type=rtsp)
 
 #include <gst/gst.h>
 #include <gst/sdp/gstsdpmessage.h>  
+#include <gst/rtsp/rtsp.h>
 
 /* Plugin information */
 #define JANUS_STREAMING_VERSION			6
@@ -362,8 +363,9 @@ typedef struct janus_streaming_mountpoint {
 } janus_streaming_mountpoint;
 
 typedef struct {
-    janus_streaming_mountpoint * mountpoint;
-    GstElement * pipeline;
+	janus_streaming_mountpoint * mountpoint;
+	GstElement * pipeline;
+	const gchar *uri;
 } pipeline_callback_t;
 
 typedef struct {
@@ -408,9 +410,10 @@ static GstElement * sender_bin_create(void);
 
 static void link_rtp_pad_to_sender_bin(GstElement * source, GstPad * input_pad, const gchar *media, pipeline_callback_t * callback_data);
 
-void
+static void
 rtspsrc_on_no_more_pads (GstElement *element, pipeline_callback_t * callback_data);
 
+static void rtspsrc_on_handle_request (GstElement *rtspsrc, GstRTSPMessage *request, GstRTSPMessage *response, pipeline_callback_t * callback_data);
 
 static void
 rtspsrc_pad_added_callback(GstElement * element, GstPad * pad, pipeline_callback_t * callback_data);
@@ -1250,6 +1253,8 @@ static void teardown_pipeline(janus_streaming_mountpoint *mountpoint) {
 
 static gboolean on_eos(GstBus *bus, GstMessage *message, gpointer data)
 {
+
+	JANUS_LOG(LOG_INFO, "Handling pipeline EOS event\n");
 	gchar *id = (gchar *)data;
 	janus_mutex_lock(&mountpoints_mutex);
 	janus_streaming_mountpoint *mp = g_hash_table_lookup(mountpoints, id);
@@ -1429,7 +1434,7 @@ static void link_rtp_pad_to_sender_bin(GstElement * source, GstPad * input_pad, 
     //gst_element_link_many (source, sender_bin, output_bin, NULL);
 }
 
-void
+static void
 rtspsrc_on_no_more_pads (GstElement *element, pipeline_callback_t * callback_data)
 {
     GstElement * pipeline = callback_data->pipeline;
@@ -1480,10 +1485,74 @@ rtspsrc_pad_added_callback(GstElement * element, GstPad * pad, pipeline_callback
     }
 }
 
+static void
+rtspsrc_rtpbin_on_timeout (GstElement *sess, guint ssrc, pipeline_callback_t * callback_data)
+{
+	GstEvent *eos = gst_event_new_eos();
+	JANUS_LOG(LOG_INFO, "RTSPsrc timeout occured, sending EOS\n");
+	gst_element_send_event (sess, eos);
+}
+
+
+static void
+rtspsrc_rtpbin_on_bye_ssrc (GstElement *sess, guint ssrc, pipeline_callback_t * callback_data)
+{
+	GstEvent *eos = gst_event_new_eos();
+	JANUS_LOG(LOG_INFO, "RTSPsrc BYE received, sending EOS\n");
+	gst_element_send_event (sess, eos);
+}
+
+
+static void
+rtspsrc_rtpbin_on_new_ssrc (GstElement *rtpbin, guint session_id, guint ssrc, pipeline_callback_t * callback_data)
+{
+	GstElement  *session;
+	g_signal_emit_by_name (rtpbin, "get-session", session_id, &session);
+	g_assert(session);
+	g_signal_connect(session, "on-timeout",  (GCallback) rtspsrc_rtpbin_on_timeout,  callback_data);
+	g_signal_connect(session, "on-bye-ssrc", (GCallback) rtspsrc_rtpbin_on_bye_ssrc, callback_data);
+	g_object_unref (session);
+	
+}
+
+static void
+rtspsrc_on_new_manager(GstElement * rtspsrc, GstElement * rtpbin, pipeline_callback_t * callback_data)
+{
+	g_assert(rtpbin);
+  	g_signal_connect(rtpbin, "on-new-ssrc",  (GCallback) rtspsrc_rtpbin_on_new_ssrc, callback_data);
+}
+
+
+static void
+rtspsrc_on_handle_request (GstElement *rtspsrc, GstRTSPMessage *request, GstRTSPMessage *response, pipeline_callback_t * callback_data)
+{
+	const gchar * uri = NULL;
+	GstRTSPMethod method = GST_RTSP_INVALID;
+	GstRTSPResult res;
+	
+	res = gst_rtsp_message_parse_request (request, &method, &uri, NULL);
+
+	if (res == GST_RTSP_OK) {
+		
+		JANUS_LOG(LOG_INFO, "rtspsrc_on_handle_request: %d\n", method);
+
+		if (method == GST_RTSP_TEARDOWN) {
+			if (g_strcmp0(uri, callback_data->uri) == 0) {
+				JANUS_LOG(LOG_INFO, "Received TEARDOWN for %s, sending EOS\n", uri);
+				GstEvent *eos = gst_event_new_eos();
+				gst_element_send_event (rtspsrc, eos);
+			} else {
+				JANUS_LOG(LOG_WARN, "Received TEARDOWN for unknown url: %s\n", uri);
+			}
+
+		} else {
+			JANUS_LOG(LOG_WARN, "rtspsrc_on_handle_request unknown method: %d\n", method);
+		}
+	}
+}
 
 static GstElement * create_rtsp_source_element(gpointer user_data, const pipeline_data_t * pipeline_data)
 {
-  
   GstElement * source = NULL;
 
   source = gst_element_factory_make ("rtspsrc", "source");
@@ -1494,8 +1563,10 @@ static GstElement * create_rtsp_source_element(gpointer user_data, const pipelin
       "async-handling", TRUE, 
       NULL);
 
-  g_signal_connect(source, "pad-added",    (GCallback) rtspsrc_pad_added_callback, user_data);
-  g_signal_connect(source, "no-more-pads", (GCallback) rtspsrc_on_no_more_pads,    user_data);
+  g_signal_connect(source, "pad-added",      (GCallback) rtspsrc_pad_added_callback, user_data);
+  g_signal_connect(source, "no-more-pads",   (GCallback) rtspsrc_on_no_more_pads,    user_data);
+  g_signal_connect(source, "new-manager",    (GCallback) rtspsrc_on_new_manager,     user_data);
+  g_signal_connect(source, "handle-request", (GCallback) rtspsrc_on_handle_request,  user_data);
 
   return source;
 }
@@ -1544,10 +1615,9 @@ static gpointer transcode_handler(gpointer data) {
 	GSource *bus_source = NULL;
 	GMainContext *context = NULL;
 	GMainLoop *main_loop = NULL;
-	GstElement *element = NULL;
 	pipeline_data_t *pipeline_data = (pipeline_data_t *)data;
 
-	JANUS_LOG(LOG_ERR, "transcode_handler\n");
+	JANUS_LOG(LOG_INFO, "Enter transcode_handler\n");
 
 	do
 	{
@@ -1592,6 +1662,7 @@ static gpointer transcode_handler(gpointer data) {
 
 		callback_data.pipeline = pipeline;
 		callback_data.mountpoint = mountpoint;
+		callback_data.uri = pipeline_data->uri; //todo: fix storing uri
 
 		if (g_str_has_prefix (pipeline_data->uri, "rtsp://")) {
 			source = create_rtsp_source_element(&callback_data, pipeline_data);
@@ -1626,7 +1697,8 @@ static gpointer transcode_handler(gpointer data) {
 
 		GstState state;
 		GstStateChangeReturn ret;
-	#if 0
+	//todo: cleanup
+#if 0
 		do
 		{
 			if (GST_STATE_CHANGE_FAILURE == (ret = gst_element_get_state(pipeline,
@@ -1684,8 +1756,7 @@ static gpointer transcode_handler(gpointer data) {
 			}
 			while (GST_STATE_NULL != state);
 		}
-		gst_object_unref(GST_OBJECT(element));
-		element = NULL;
+
 		gst_object_unref(GST_OBJECT(pipeline));
 		pipeline = NULL;
 		g_main_loop_unref(main_loop);
@@ -1713,10 +1784,7 @@ static gpointer transcode_handler(gpointer data) {
 		g_main_context_unref(context);
 		context = NULL;
 	}
-	if (element) {
-		gst_object_unref(GST_OBJECT(element));
-		element = NULL;
-	}
+
 	if (pipeline) {
 		gst_object_unref(pipeline);
 		pipeline = NULL;
@@ -1729,6 +1797,8 @@ static gpointer transcode_handler(gpointer data) {
 		g_free(pipeline_data);
 		pipeline_data = NULL;
 	}
+
+	JANUS_LOG(LOG_INFO, "Exit transcode_handler\n");
 
 	return NULL;
 }
@@ -2299,6 +2369,10 @@ void janus_streaming_create_session(janus_plugin_session *handle, int *error) {
 		return;
 	}	
 	janus_streaming_session *session = (janus_streaming_session *)g_malloc0(sizeof(janus_streaming_session));
+
+	JANUS_LOG(LOG_INFO, "janus_streaming_create_session");
+
+	
 	session->handle = handle;
 	session->mountpoint = NULL;	/* This will happen later */
 	session->started = FALSE;	/* This will happen later */
