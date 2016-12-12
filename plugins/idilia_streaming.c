@@ -139,6 +139,7 @@ url = RTSP stream URL (only if type=rtsp)
 
 #include <gst/gst.h>
 #include <gst/sdp/gstsdpmessage.h>  
+#include <gst/rtsp/rtsp.h>
 
 /* Plugin information */
 #define JANUS_STREAMING_VERSION			6
@@ -452,6 +453,7 @@ typedef struct janus_streaming_rtp_relay_packet {
 typedef struct {
     janus_streaming_mountpoint * mountpoint;
     GstElement * pipeline;
+	const gchar *uri;
 } pipeline_callback_t;
 
 typedef struct {
@@ -472,7 +474,7 @@ static GstElement * sender_bin_create(void);
 
 static void link_rtp_pad_to_sender_bin(GstElement * source, GstPad * input_pad, const gchar *media, pipeline_callback_t * callback_data);
 
-void
+static void
 rtspsrc_on_no_more_pads (GstElement *element, pipeline_callback_t * callback_data);
 
 
@@ -483,6 +485,7 @@ static GstElement * create_rtsp_source_element(gpointer user_data, const pipelin
 
 static GstElement *
 create_videotestsrc_bin (gpointer user_data, const pipeline_data_t * pipeline_data);
+
 
 
 /* Error codes */
@@ -850,17 +853,11 @@ static void teardown_pipeline(janus_streaming_mountpoint *mountpoint) {
 		}
 	}
 	while(0);
-
-	// cleanup
-	if (curl_handle) {
-		curl_easy_cleanup(curl_handle);
-		curl_handle = NULL;
-	}
-
 }
 
 static gboolean on_eos(GstBus *bus, GstMessage *message, gpointer data)
 {
+	JANUS_LOG(LOG_INFO, "Handling pipeline EOS event\n");
 	gchar *id = (gchar *)data;
 	janus_mutex_lock(&mountpoints_mutex);
 	janus_streaming_mountpoint *mp = g_hash_table_lookup(mountpoints, id);
@@ -900,11 +897,12 @@ create_remote_rtp_output(guint port, const gchar * media)
     GstElement * udpsink, *filter;
 	GstCaps *filtercaps;
 	GstBin *sinkbin;
-	GstPad * pad, *pad1;
+	GstPad * pad;
+
 	sinkbin = gst_bin_new (NULL);
   
     gchar *name = g_strdup_printf("rtp_sink_%s", media);
-	JANUS_LOG(LOG_INFO,"\ncreate_remote_rtp_output  name sink %s\n",name);
+	
     udpsink = gst_element_factory_make ("udpsink", name);
     g_assert (udpsink);
     g_object_set (G_OBJECT (udpsink), "port", port, NULL);
@@ -914,31 +912,28 @@ create_remote_rtp_output(guint port, const gchar * media)
 
 	gst_bin_add_many (GST_BIN (sinkbin),  filter, udpsink, NULL);
 	gst_element_link (filter, udpsink);
-			
 
-	filtercaps = gst_caps_new_simple ( "application/x-rtp",
+	
+	if (!g_strcmp0 (media, "audio")) {		
+		filtercaps = gst_caps_new_simple ( "application/x-rtp",
+				"clock-rate", G_TYPE_INT, 48000, NULL);
+		g_object_set (G_OBJECT (filter), "caps", filtercaps, NULL);
+
+	} else if (!g_strcmp0 (media, "video")) {	
+		filtercaps = gst_caps_new_simple ( "application/x-rtp",
                "clock-rate", G_TYPE_INT, 90000, NULL);
+		g_object_set (G_OBJECT (filter), "caps", filtercaps, NULL);
+	}
 
-	g_object_set (G_OBJECT (filter), "caps", filtercaps, NULL);
+	pad = gst_element_get_static_pad (filter, "sink");
+	g_assert (pad);
 
-	pad = gst_element_get_static_pad (udpsink, name);
-	//g_assert (pad != NULL);
+	if(gst_element_add_pad (sinkbin, gst_ghost_pad_new ("sink", pad)) != TRUE){
+		JANUS_LOG(LOG_INFO,"gst_element_add_pad failed \n");		
+	}
 
-	JANUS_LOG(LOG_INFO,"\nadd pad\n");
-	//if(gst_pad_is_linked(pad) == FALSE){
-		//pad = gst_element_get_static_pad (udpsink, "sink");
-		//g_assert (pad != NULL);
-		JANUS_LOG(LOG_INFO,"\nadd pad\n");
-		if(gst_element_add_pad (sinkbin,gst_ghost_pad_new ("sink", pad)) != TRUE){
-			JANUS_LOG(LOG_INFO,"gst_element_add_pad failed \n");
-		}
-		/*if(gst_pad_set_active(pad,TRUE) != TRUE){
-			JANUS_LOG(LOG_INFO,"gst_pad_set_active failed \n");
-		}*/
-		 gst_object_unref (GST_OBJECT (pad));
-	//}
-
-    gst_caps_unref (filtercaps);
+	gst_object_unref (GST_OBJECT (pad));
+    
     g_free(name);
 
     return sinkbin;
@@ -959,6 +954,8 @@ create_remote_rtcp_input(const gchar * media, GSocket *socket)
     return udpsrc;
 }
 
+
+
 static void sender_bin_add_media_pads_to_rtpbin(GstElement * bin, guint pad_id, const gchar * media) {
 
     GstElement * rtpbin;
@@ -975,6 +972,9 @@ static void sender_bin_add_media_pads_to_rtpbin(GstElement * bin, guint pad_id, 
 
     rtpbin = gst_bin_get_by_name(GST_BIN(bin), "rtpbin");
     g_assert(rtpbin);
+
+
+	
 
     rtpbin_send_rtp_sink_pad = gst_element_get_request_pad (rtpbin, rtpbin_sinkpad_name);
     g_assert(rtpbin_send_rtp_sink_pad);
@@ -1003,6 +1003,27 @@ static void sender_bin_add_media_pads_to_rtpbin(GstElement * bin, guint pad_id, 
 
 }
 
+static GstCaps *
+on_request_pt_map (GstElement * rtpbin, guint session_id, guint pt,
+    gpointer user_data)
+{
+
+  JANUS_LOG(LOG_INFO, "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! on_request_pt_map\n");
+  GstCaps *caps = NULL;
+  if (pt == 111) {
+    caps =
+        gst_caps_from_string
+        ("application/x-rtp,media=(string)audio,clock-rate=(int)48000");
+  } else if (pt == 96) {
+    caps =
+        gst_caps_from_string
+        ("application/x-rtp,media=(string)video,clock-rate=(int)90000");
+  }
+  return caps;
+}
+
+ 
+
 static GstElement * sender_bin_create (void)
 {
     GstElement *bin, *rtpbin;
@@ -1013,11 +1034,12 @@ static GstElement * sender_bin_create (void)
     rtpbin = gst_element_factory_make ("rtpbin", "rtpbin");
     g_assert (rtpbin);
 
+	
     g_object_set (G_OBJECT (rtpbin), "rtp-profile", 3, NULL);
     g_object_set (G_OBJECT (rtpbin), "latency",  0, NULL);
 	
     gst_bin_add_many (GST_BIN (bin), rtpbin, NULL);
-
+	g_signal_connect(rtpbin, "request-pt-map",  (GCallback) on_request_pt_map, NULL);  
     sender_bin_add_media_pads_to_rtpbin(bin, 0, "video");
     sender_bin_add_media_pads_to_rtpbin(bin, 1, "audio");
 
@@ -1062,7 +1084,7 @@ static void link_rtp_pad_to_sender_bin(GstElement * source, GstPad * input_pad, 
     sinkpad_name = g_strdup_printf("%s_sink", media);
     srcpad_name = g_strdup_printf("%s_src", media);
     rtcp_sinkpad_name = g_strdup_printf("%s_rtcp_sink", media);
-
+	gchar *outpadname = g_strdup_printf("rtp_sink_%s", media);	
     senderbin_sinkpad = gst_element_get_static_pad (sender_bin, sinkpad_name);
     g_assert(senderbin_sinkpad);
 
@@ -1074,7 +1096,7 @@ static void link_rtp_pad_to_sender_bin(GstElement * source, GstPad * input_pad, 
   
     senderbin_rtcp_sinkpad = gst_element_get_static_pad (sender_bin, rtcp_sinkpad_name);
     g_assert(senderbin_rtcp_sinkpad);
-
+  
     rtcp_srcpad = gst_element_get_static_pad (rtcp_src, "src");
     g_assert(rtcp_srcpad);
 
@@ -1090,7 +1112,7 @@ static void link_rtp_pad_to_sender_bin(GstElement * source, GstPad * input_pad, 
     //gst_element_link_many (source, sender_bin, output_bin, NULL);
 }
 
-void
+static void
 rtspsrc_on_no_more_pads (GstElement *element, pipeline_callback_t * callback_data)
 {
     GstElement * pipeline = callback_data->pipeline;
@@ -1141,9 +1163,77 @@ rtspsrc_pad_added_callback(GstElement * element, GstPad * pad, pipeline_callback
     }
 
     if (connect_output) {
+		JANUS_LOG (LOG_INFO, "rtspsrc_pad_added_callback\n");
         link_rtp_pad_to_sender_bin(element, pad, media, callback_data);
     }
 }
+
+rtspsrc_rtpbin_on_timeout (GstElement *sess, guint ssrc, pipeline_callback_t * callback_data)
+{
+	GstEvent *eos = gst_event_new_eos();
+	JANUS_LOG(LOG_INFO, "RTSPsrc timeout occured, sending EOS\n");
+	gst_element_send_event (sess, eos);
+}
+
+
+static void
+rtspsrc_rtpbin_on_bye_ssrc (GstElement *sess, guint ssrc, pipeline_callback_t * callback_data)
+{
+	GstEvent *eos = gst_event_new_eos();
+	JANUS_LOG(LOG_INFO, "RTSPsrc BYE received, sending EOS\n");
+	gst_element_send_event (sess, eos);
+}
+
+
+static void
+rtspsrc_rtpbin_on_new_ssrc (GstElement *rtpbin, guint session_id, guint ssrc, pipeline_callback_t * callback_data)
+{
+	GstElement  *session;
+	g_signal_emit_by_name (rtpbin, "get-session", session_id, &session);
+	g_assert(session);
+	g_signal_connect(session, "on-timeout",  (GCallback) rtspsrc_rtpbin_on_timeout,  callback_data);
+	g_signal_connect(session, "on-bye-ssrc", (GCallback) rtspsrc_rtpbin_on_bye_ssrc, callback_data);
+	g_object_unref (session);
+	
+}
+
+
+static void
+rtspsrc_on_new_manager(GstElement * rtspsrc, GstElement * rtpbin, pipeline_callback_t * callback_data)
+{
+	g_assert(rtpbin);
+  	g_signal_connect(rtpbin, "on-new-ssrc",  (GCallback) rtspsrc_rtpbin_on_new_ssrc, callback_data);
+}
+
+
+static void
+rtspsrc_on_handle_request (GstElement *rtspsrc, GstRTSPMessage *request, GstRTSPMessage *response, pipeline_callback_t * callback_data)
+{
+	const gchar * uri = NULL;
+	GstRTSPMethod method = GST_RTSP_INVALID;
+	GstRTSPResult res;
+	
+	res = gst_rtsp_message_parse_request (request, &method, &uri, NULL);
+
+	if (res == GST_RTSP_OK) {
+		
+		JANUS_LOG(LOG_INFO, "rtspsrc_on_handle_request: %d\n", method);
+
+		if (method == GST_RTSP_TEARDOWN) {
+			if (g_strcmp0(uri, callback_data->uri) == 0) {
+				JANUS_LOG(LOG_INFO, "Received TEARDOWN for %s, sending EOS\n", uri);
+				GstEvent *eos = gst_event_new_eos();
+				gst_element_send_event (rtspsrc, eos);
+			} else {
+				JANUS_LOG(LOG_WARN, "Received TEARDOWN for unknown url: %s\n", uri);
+			}
+
+		} else {
+			JANUS_LOG(LOG_WARN, "rtspsrc_on_handle_request unknown method: %d\n", method);
+		}
+	}
+}
+
 
 
 static GstElement * create_rtsp_source_element(gpointer user_data, const pipeline_data_t * pipeline_data)
@@ -1159,8 +1249,10 @@ static GstElement * create_rtsp_source_element(gpointer user_data, const pipelin
       "async-handling", TRUE, NULL);
   
 
-  g_signal_connect(source, "pad-added",    (GCallback) rtspsrc_pad_added_callback, user_data);
-  g_signal_connect(source, "no-more-pads", (GCallback) rtspsrc_on_no_more_pads,    user_data);
+  g_signal_connect(source, "pad-added",      (GCallback) rtspsrc_pad_added_callback, user_data);
+  g_signal_connect(source, "no-more-pads",   (GCallback) rtspsrc_on_no_more_pads,    user_data);
+  g_signal_connect(source, "new-manager",    (GCallback) rtspsrc_on_new_manager,     user_data);
+  g_signal_connect(source, "handle-request", (GCallback) rtspsrc_on_handle_request,  user_data);
 
   return source;
 }
@@ -1210,10 +1302,10 @@ static gpointer transcode_handler(gpointer data) {
 	GSource *bus_source = NULL;
 	GMainContext *context = NULL;
 	GMainLoop *main_loop = NULL;
-	GstElement *element = NULL;
+
 	pipeline_data_t *pipeline_data = (pipeline_data_t *)data;
 
-	JANUS_LOG(LOG_ERR, "transcode_handler\n");
+	JANUS_LOG(LOG_INFO, "Enter transcode_handler\n");
 
 	do
 	{
@@ -1258,6 +1350,7 @@ static gpointer transcode_handler(gpointer data) {
 
 		callback_data.pipeline = pipeline;
 		callback_data.mountpoint = mountpoint;
+		callback_data.uri = pipeline_data->uri;
 
 		if (g_str_has_prefix (pipeline_data->uri, "rtsp://")) {
 			source = create_rtsp_source_element(&callback_data, pipeline_data);
@@ -1350,8 +1443,7 @@ static gpointer transcode_handler(gpointer data) {
 			}
 			while (GST_STATE_NULL != state);
 		}
-		gst_object_unref(GST_OBJECT(element));
-		element = NULL;
+
 		gst_object_unref(GST_OBJECT(pipeline));
 		pipeline = NULL;
 		g_main_loop_unref(main_loop);
@@ -1379,10 +1471,7 @@ static gpointer transcode_handler(gpointer data) {
 		g_main_context_unref(context);
 		context = NULL;
 	}
-	if (element) {
-		gst_object_unref(GST_OBJECT(element));
-		element = NULL;
-	}
+
 	if (pipeline) {
 		gst_object_unref(pipeline);
 		pipeline = NULL;
@@ -1395,6 +1484,8 @@ static gpointer transcode_handler(gpointer data) {
 		g_free(pipeline_data);
 		pipeline_data = NULL;
 	}
+
+	JANUS_LOG(LOG_INFO, "Exit transcode_handler\n");
 
 	return NULL;
 }
@@ -1947,6 +2038,9 @@ void janus_streaming_create_session(janus_plugin_session *handle, int *error) {
 		*error = -1;
 		return;
 	}	
+
+	JANUS_LOG(LOG_INFO, "janus_streaming_create_session");
+
 	janus_streaming_session *session = (janus_streaming_session *)g_malloc0(sizeof(janus_streaming_session));
 	session->handle = handle;
 	session->mountpoint = NULL;	/* This will happen later */
@@ -1975,16 +2069,17 @@ void janus_streaming_destroy_session(janus_plugin_session *handle, int *error) {
 	}
 	JANUS_LOG(LOG_VERB, "Removing streaming session...\n");
 	if(session->mountpoint) {
+
 		janus_mutex_lock(&session->mountpoint->mutex);
 		guint old_listeners = g_list_length(session->mountpoint->listeners);
-		JANUS_LOG(LOG_INFO, "Removing listeners... %u\n",old_listeners);
+		JANUS_LOG(LOG_INFO, "janus_streaming_destroy_session Removing listeners... %u\n",old_listeners);
 		session->mountpoint->listeners = g_list_remove_all(session->mountpoint->listeners, session);
 		guint listeners = g_list_length(session->mountpoint->listeners);
-		JANUS_LOG(LOG_INFO, "Removing listeners... old_listeners %u listeners\n",old_listeners,listeners); 
+		JANUS_LOG(LOG_INFO, "janus_streaming_destroy_session Removing listeners... old_listeners %u listeners\n",old_listeners,listeners); 
 		janus_mutex_unlock(&session->mountpoint->mutex);
 		if (old_listeners && !listeners) {
-			JANUS_LOG(LOG_INFO, "teardown... old_listeners %u listeners\n",old_listeners,listeners);
-			teardown_pipeline(session->mountpoint);
+			JANUS_LOG(LOG_INFO, "janus_streaming_destroy_session teardown... old_listeners %u listeners\n",old_listeners,listeners);
+			//teardown_pipeline(session->mountpoint);
 		}
 	}
 	janus_mutex_lock(&sessions_mutex);	
@@ -2245,8 +2340,7 @@ struct janus_plugin_result *janus_streaming_handle_message(janus_plugin_session 
 			}
 			if(id == NULL) {
 				JANUS_LOG(LOG_VERB, "Missing id, will generate a random one...\n");
-			} else {				
-				JANUS_LOG(LOG_ERR, "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
+			} else {								
 				janus_mutex_lock(&mountpoints_mutex);
 				mp = g_hash_table_lookup(mountpoints, json_string_value(id));
 				janus_mutex_unlock(&mountpoints_mutex);
@@ -2361,7 +2455,7 @@ struct janus_plugin_result *janus_streaming_handle_message(janus_plugin_session 
 			goto plugin_response;
 		}
 		const gchar *id_value = json_string_value(id);
-		JANUS_LOG(LOG_INFO, "\nmountpoint/stream %s ~!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n", id_value);
+		JANUS_LOG(LOG_INFO, "\nDETROY REQ-- mountpoint/stream %s ~!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n", id_value);
 		janus_mutex_lock(&mountpoints_mutex);
 		janus_streaming_mountpoint *mp = g_hash_table_lookup(mountpoints, id_value);
 		if(mp == NULL) {
@@ -2378,7 +2472,7 @@ struct janus_plugin_result *janus_streaming_handle_message(janus_plugin_session 
 			janus_mutex_unlock(&mountpoints_mutex);
 			goto plugin_response;
 		}
-		JANUS_LOG(LOG_VERB, "Request to unmount mountpoint/stream %s\n", id_value);
+		JANUS_LOG(LOG_INFO, "Request to unmount mountpoint/stream %s\n", id_value);
 		/* FIXME Should we kick the current viewers as well? */
 		janus_mutex_lock(&mp->mutex);
 		GList *viewer = g_list_first(mp->listeners);
@@ -2417,6 +2511,7 @@ struct janus_plugin_result *janus_streaming_handle_message(janus_plugin_session 
 		}
 		/* Remove mountpoint from the hashtable: this will get it destroyed */
 		if(!mp->destroyed) {
+			JANUS_LOG(LOG_INFO,"!!!!!!!!!!!!!!!!!!!!!!!! DESTROY  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
 			mp->destroyed = janus_get_monotonic_time();
 			g_hash_table_remove(mountpoints, id_value);
 			/* Cleaning up and removing the mountpoint is done in a lazy way */
@@ -2867,7 +2962,7 @@ static void *janus_streaming_handler(void *data) {
 			janus_mutex_lock(&mountpoints_mutex);
 			janus_streaming_mountpoint *mp = g_hash_table_lookup(mountpoints, id_value);
 			if(mp->active == FALSE){			
-				JANUS_LOG(LOG_ERR, "Mountpoint/stream already used id: %s\n", id_value);
+				JANUS_LOG(LOG_ERR, "!!!!!!!!!!!!!!!!!!!Mountpoint/stream creation used id: %s\n", id_value);
 				janus_mutex_unlock(&mountpoints_mutex);
 				setup_pipeline(id_value);
 				janus_mutex_lock(&mountpoints_mutex);
@@ -3071,16 +3166,24 @@ static void *janus_streaming_handler(void *data) {
 			json_object_set_new(result, "status", json_string("stopping"));
 			if(session->mountpoint) {
 				janus_mutex_lock(&session->mountpoint->mutex);
-				JANUS_LOG(LOG_VERB, "  -- Removing the session from the mountpoint listeners\n");
+				JANUS_LOG(LOG_INFO, "  -- Removing the session from the mountpoint listeners\n");
 				if(g_list_find(session->mountpoint->listeners, session) != NULL) {
 					JANUS_LOG(LOG_INFO, "  -- -- Found!\n");
 				}
 				guint old_listeners = g_list_length(session->mountpoint->listeners);
+				JANUS_LOG(LOG_INFO, "  STOP REQ-- old listeners  list length %d\n",old_listeners);
 				session->mountpoint->listeners = g_list_remove_all(session->mountpoint->listeners, session);
 				guint listeners = g_list_length(session->mountpoint->listeners);
+				JANUS_LOG(LOG_INFO, "  STOP REQ-- listeners  list length %d\n",listeners);
 				janus_mutex_unlock(&session->mountpoint->mutex);
 				if (old_listeners && !listeners) {
-					teardown_pipeline(session->mountpoint);
+					json_t *id = json_object_get(root, "id");
+					const gchar *id_value = json_string_value(id);
+					JANUS_LOG(LOG_INFO, "  STOP REQ if (old_listeners && !listeners) -- listeners list %d\n",old_listeners);
+					janus_mutex_lock(&mountpoints_mutex);
+					janus_streaming_mountpoint *mp = g_hash_table_lookup(mountpoints, session->mountpoint->id);
+					g_hash_table_remove(mountpoints, session->mountpoint->id);
+					janus_mutex_unlock(&mountpoints_mutex);								
 				}
 			}
 			session->mountpoint = NULL;
@@ -3106,7 +3209,7 @@ static void *janus_streaming_handler(void *data) {
 		json_t *event = json_object();
 		json_object_set_new(event, "streaming", json_string("event"));
 
-		JANUS_LOG(LOG_INFO,"\n Prepare JSON event \n %s \n ",sdp);
+		//JANUS_LOG(LOG_INFO,"\n Prepare JSON event \n %s \n ",sdp);
 		if(result != NULL)
 			json_object_set_new(event, "result", result);
 		int ret = gateway->push_event(msg->handle, &janus_streaming_plugin, msg->transaction, event, jsep);

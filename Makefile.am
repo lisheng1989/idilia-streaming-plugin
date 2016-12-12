@@ -45,17 +45,10 @@ CLEANFILES = $(NULL)
 plugins_cflags = \
 	$(AM_CFLAGS) \
 	$(PLUGINS_CFLAGS) \
-	-I/usr/include/gstreamer-1.0 \
-	-I/usr/lib/x86_64-linux-gnu/gstreamer-1.0/include \
 	$(NULL)
 
 plugins_libadd = \
 	$(PLUGINS_LIBS) \
-	$(NULL)
-
-plugins_ldflags = \
-	-lgstreamer-1.0 \
-	-lgstsdp-1.0 \
 	$(NULL)
 
 if ENABLE_PLUGIN_STREAMING
