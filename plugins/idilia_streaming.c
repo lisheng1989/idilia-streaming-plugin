@@ -546,6 +546,7 @@ create_remote_rtp_output(guint port, const gchar * media)
     GstElement * udpsink, *filter;	
 	GstElement *sinkbin;
 	GstPad * pad;
+	GstCaps *filtercaps;
 
 	sinkbin = gst_bin_new (NULL);
   
@@ -557,6 +558,9 @@ create_remote_rtp_output(guint port, const gchar * media)
 	
 	filter = gst_element_factory_make ("capsfilter", "filter");
 	g_assert (filter != NULL); 
+
+	filtercaps = gst_caps_new_simple ( "application/x-rtp", "media", G_TYPE_STRING, media, NULL);
+	g_object_set (G_OBJECT (filter), "caps", filtercaps, NULL);
 
 	gst_bin_add_many (GST_BIN (sinkbin),  filter, udpsink, NULL);
 	gst_element_link (filter, udpsink);
@@ -663,10 +667,11 @@ static void link_rtp_pad_to_sender_bin(GstElement * source, GstPad * input_pad, 
 {
 
     GstElement *udp_sink_bin = NULL, * sender_bin, *rtcp_src;
-    gchar * sinkpad_name, *srcpad_name, *rtcp_sinkpad_name;
+    gchar *rtcp_sinkpad_name;
     GstElement * pipeline = callback_data->pipeline;
     gint stream_type;
-    GstPad * output_sinkpad, * senderbin_sinkpad, *senderbin_srcpad, *rtcp_srcpad, *senderbin_rtcp_sinkpad;
+    GstPad *rtcp_srcpad, *senderbin_rtcp_sinkpad, *rtp_bin_sink_pad;
+
     g_assert(input_pad);
     g_assert(pipeline);
     g_assert(media);
@@ -694,35 +699,29 @@ static void link_rtp_pad_to_sender_bin(GstElement * source, GstPad * input_pad, 
 
     g_assert (gst_element_set_state (udp_sink_bin, GST_STATE_PLAYING) != GST_STATE_CHANGE_FAILURE);
 
-    sinkpad_name = g_strdup_printf("%s_sink", media);
-    srcpad_name = g_strdup_printf("%s_src", media);
     rtcp_sinkpad_name = g_strdup_printf("%s_rtcp_sink", media);
-	
-    senderbin_sinkpad = gst_element_get_static_pad (sender_bin, sinkpad_name);
-    g_assert(senderbin_sinkpad);
 
-    senderbin_srcpad = gst_element_get_static_pad (sender_bin, srcpad_name);
-    g_assert(senderbin_srcpad);
-
-    output_sinkpad = gst_element_get_static_pad (udp_sink_bin, "sink");	
-    g_assert(output_sinkpad);
-  
     senderbin_rtcp_sinkpad = gst_element_get_static_pad (sender_bin, rtcp_sinkpad_name);
     g_assert(senderbin_rtcp_sinkpad);
   
     rtcp_srcpad = gst_element_get_static_pad (rtcp_src, "src");
     g_assert(rtcp_srcpad);
 
-    g_assert (gst_pad_link (input_pad, senderbin_sinkpad) == GST_PAD_LINK_OK);
-    g_assert (gst_pad_link (senderbin_srcpad, output_sinkpad) == GST_PAD_LINK_OK);
     g_assert (gst_pad_link (rtcp_srcpad, senderbin_rtcp_sinkpad) == GST_PAD_LINK_OK);
 
-    g_free(sinkpad_name);
-    g_free(srcpad_name);
-    g_free(rtcp_sinkpad_name);
+    gst_element_link_many (source, sender_bin, udp_sink_bin, NULL);	
 
-    //todo: add media type capsfilter in sender bin for automatic linking 
-    //gst_element_link_many (source, sender_bin, output_bin, NULL);
+    rtp_bin_sink_pad = gst_element_get_static_pad (udp_sink_bin, "sink");
+    g_assert(rtp_bin_sink_pad);
+	gst_object_unref(rtp_bin_sink_pad);
+
+
+    g_free(rtcp_sinkpad_name);
+	gst_object_unref(senderbin_rtcp_sinkpad);
+	gst_object_unref(rtcp_srcpad);
+	gst_object_unref(sender_bin);
+
+	return;
 }
 
 static void
@@ -737,8 +736,6 @@ rtspsrc_on_no_more_pads (GstElement *element, pipeline_callback_t * callback_dat
 	msg->transaction = NULL;
 	msg->jsep = NULL;
 	g_async_queue_push(messages, msg);
-
-    GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(pipeline), GST_DEBUG_GRAPH_SHOW_ALL, "pipeline");
 }
 
 
@@ -2649,7 +2646,7 @@ static void janus_streaming_relay_rtp_packet(gpointer data, gpointer user_data) 
 		return;
 	}
 	if((!session->started || session->paused )) {
-		JANUS_LOG(LOG_WARN, "Streaming not started yet for this session...\n");
+		JANUS_LOG(LOG_VERB, "Streaming not started yet for this session...\n");
 		return;
 	}
 	else{
