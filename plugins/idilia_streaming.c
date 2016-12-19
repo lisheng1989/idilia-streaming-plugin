@@ -595,7 +595,7 @@ create_remote_rtcp_input(const gchar * media, GSocket *socket)
 static void sender_bin_add_media_pads_to_rtpbin(GstElement * bin, guint pad_id, const gchar * media) {
 
     GstElement * rtpbin;
-    GstPad *rtpbin_send_rtp_sink_pad, *rtpbin_send_rtp_src_pad, *rtpbin_recv_rctp_sink_pad;
+    GstPad *rtpbin_send_rtp_sink_pad, *rtpbin_send_rtp_src_pad, *rtpbin_recv_rctp_sink_pad, *ghost_pad;
 
     gchar * sinkpad_name, *srcpad_name, *rtcp_sinkpad_name, * rtpbin_sinkpad_name, *rtpbin_srcpad_name, *rtpbin_recv_rtcp_sink_pad_name;
 
@@ -611,20 +611,23 @@ static void sender_bin_add_media_pads_to_rtpbin(GstElement * bin, guint pad_id, 
 
     rtpbin_send_rtp_sink_pad = gst_element_get_request_pad (rtpbin, rtpbin_sinkpad_name);
     g_assert(rtpbin_send_rtp_sink_pad);
-
-    gst_element_add_pad (bin, gst_ghost_pad_new (sinkpad_name, rtpbin_send_rtp_sink_pad));
+	ghost_pad = gst_ghost_pad_new (sinkpad_name, rtpbin_send_rtp_sink_pad);
+	gst_pad_set_active(ghost_pad, TRUE);
+    gst_element_add_pad (bin, ghost_pad);
     gst_object_unref (rtpbin_send_rtp_sink_pad);
 	
     rtpbin_send_rtp_src_pad = gst_element_get_static_pad (rtpbin, rtpbin_srcpad_name);
     g_assert(rtpbin_send_rtp_src_pad);
-
-    gst_element_add_pad (bin, gst_ghost_pad_new (srcpad_name, rtpbin_send_rtp_src_pad));
+	ghost_pad = gst_ghost_pad_new (srcpad_name, rtpbin_send_rtp_src_pad);
+	gst_pad_set_active(ghost_pad, TRUE);
+    gst_element_add_pad (bin, ghost_pad);
     gst_object_unref (rtpbin_send_rtp_src_pad);
 
     rtpbin_recv_rctp_sink_pad = gst_element_get_request_pad (rtpbin, rtpbin_recv_rtcp_sink_pad_name);
     g_assert(rtpbin_recv_rctp_sink_pad);
-
-    gst_element_add_pad (bin, gst_ghost_pad_new (rtcp_sinkpad_name, rtpbin_recv_rctp_sink_pad));
+	ghost_pad = gst_ghost_pad_new (rtcp_sinkpad_name, rtpbin_recv_rctp_sink_pad);
+	gst_pad_set_active(ghost_pad, TRUE);
+    gst_element_add_pad (bin, ghost_pad);
     gst_object_unref (rtpbin_recv_rctp_sink_pad);
 
     g_free(sinkpad_name);
@@ -651,9 +654,7 @@ static GstElement * sender_bin_create (void)
     g_object_set (G_OBJECT (rtpbin), "latency",  0, NULL);
 	
     gst_bin_add_many (GST_BIN (bin), rtpbin, NULL);
-	
-    sender_bin_add_media_pads_to_rtpbin(bin, 0, "video");
-    sender_bin_add_media_pads_to_rtpbin(bin, 1, "audio");
+
 
     return bin;
 }
@@ -674,8 +675,10 @@ static void link_rtp_pad_to_sender_bin(GstElement * source, GstPad * input_pad, 
     g_assert(sender_bin);
 
     if (!g_strcmp0 (media, "audio")) {
+	  sender_bin_add_media_pads_to_rtpbin(sender_bin, 1, media);
       stream_type = JANUS_STREAMING_STREAM_AUDIO;
     } else if (!g_strcmp0 (media, "video")) {
+	  sender_bin_add_media_pads_to_rtpbin(sender_bin, 0, media);
       stream_type = JANUS_STREAMING_STREAM_VIDEO;
     } else {
       return;
@@ -735,7 +738,7 @@ rtspsrc_on_no_more_pads (GstElement *element, pipeline_callback_t * callback_dat
 	msg->jsep = NULL;
 	g_async_queue_push(messages, msg);
 
-    GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(pipeline), GST_DEBUG_GRAPH_SHOW_STATES, "pipeline");
+    GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(pipeline), GST_DEBUG_GRAPH_SHOW_ALL, "pipeline");
 }
 
 
@@ -972,8 +975,6 @@ static gpointer transcode_handler(gpointer data) {
 
 		sender_bin = sender_bin_create();
 		g_assert (sender_bin);
-
-		/* add objects to the main pipeline, this takes ownership */
     	gst_bin_add_many (GST_BIN (pipeline), sender_bin, NULL);
 
 		callback_data.pipeline = pipeline;
@@ -1058,6 +1059,12 @@ static gpointer transcode_handler(gpointer data) {
 		janus_mutex_unlock(&transcode_main_loops_mutex);		
 		g_free(pipeline_data);
 		pipeline_data = NULL;
+
+#if 0
+		sleep(10);
+    	GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(pipeline), GST_DEBUG_GRAPH_SHOW_ALL, "pipeline_delayed");
+#endif
+
 		g_main_loop_run(main_loop);
 		if (GST_STATE_CHANGE_FAILURE == gst_element_set_state(pipeline, GST_STATE_NULL)) {
 			JANUS_LOG(LOG_ERR, "Could not change state of pipeline to NULL state.\n");
@@ -2630,6 +2637,7 @@ janus_streaming_mountpoint *janus_streaming_create_rtp_source(
 }
 
 static void janus_streaming_relay_rtp_packet(gpointer data, gpointer user_data) {
+
 	janus_streaming_rtp_relay_packet *packet = (janus_streaming_rtp_relay_packet *)user_data;
 	if(!packet || !packet->data || packet->length < 1) {
 		JANUS_LOG(LOG_ERR, "Invalid packet...\n");
