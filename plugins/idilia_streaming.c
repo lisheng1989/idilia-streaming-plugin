@@ -1116,7 +1116,7 @@ static gpointer transcode_handler(gpointer data) {
 		janus_mutex_lock(&sessions_mutex);
 		session = g_hash_table_lookup(sessions, pipeline_data->handle);			
 
-		if(session != NULL) {								
+		/*if(session != NULL) {								
 			
 			session->stopping = TRUE;
 			session->started = FALSE;
@@ -1162,7 +1162,7 @@ static gpointer transcode_handler(gpointer data) {
 					janus_mutex_unlock(&mountpoints_mutex);								
 				}				
 			}
-		}
+		}*/
 
 		janus_mutex_unlock(&sessions_mutex);
 
@@ -1589,7 +1589,7 @@ void janus_streaming_destroy_session(janus_plugin_session *handle, int *error) {
 					JANUS_LOG(LOG_INFO, "Remove mountpoint - the last viewer  %u  \n",listeners);		
 					g_hash_table_remove(mountpoints, mp->id);
 					mp->active = FALSE;	
-					janus_streaming_mountpoint_free(mp);							
+					
 				}
 				janus_mutex_unlock(&mountpoints_mutex);								
 			}				
@@ -2442,7 +2442,7 @@ static void *janus_streaming_handler(void *data) {
 				continue;
 			}
 									
-			if(session != NULL) {					
+			/*if(session != NULL) {					
 				
 				session->stopping = TRUE;
 				session->started = FALSE;
@@ -2488,7 +2488,7 @@ static void *janus_streaming_handler(void *data) {
 						janus_mutex_unlock(&mountpoints_mutex);								
 					}				
 				}
-			}
+			}*/
 			
 		} else {
 			JANUS_LOG(LOG_VERB, "Unknown request '%s'\n", request_text);
