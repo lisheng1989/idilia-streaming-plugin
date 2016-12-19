@@ -53,7 +53,7 @@ plugins_libadd = \
 
 if ENABLE_PLUGIN_STREAMING
 plugin_LTLIBRARIES += plugins/libidilia_streaming.la
-plugins_libidilia_streaming_la_SOURCES = plugins/idilia_streaming.c plugins/ports_pool.c plugins/socket_utils.c
+plugins_libidilia_streaming_la_SOURCES = plugins/idilia_streaming.c plugins/ports_pool.c plugins/socket_utils.c plugins/curl_utils.c
 plugins_libidilia_streaming_la_CFLAGS = $(plugins_cflags)
 plugins_libidilia_streaming_la_LDFLAGS = $(plugins_ldflags)
 plugins_libidilia_streaming_la_LIBADD = $(plugins_libadd)
