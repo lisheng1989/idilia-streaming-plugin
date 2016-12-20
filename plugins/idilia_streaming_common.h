@@ -50,7 +50,7 @@ typedef struct janus_streaming_mountpoint {
 	gboolean enabled;
 	gboolean active;	
 	//void *source;	/* Can differ according to the source type */
-	GDestroyNotify source_destroy;
+	//GDestroyNotify source_destroy;
 	janus_streaming_codecs codecs;
 	GList/*<unowned janus_streaming_session>*/ *listeners;
 	gint64 destroyed;
@@ -58,6 +58,5 @@ typedef struct janus_streaming_mountpoint {
 	socket_utils_socket socket[JANUS_STREAMING_STREAM_MAX][JANUS_STREAMING_SOCKET_MAX];
 	janus_streaming_socket_cbk_data rtp_cbk_data[JANUS_STREAMING_STREAM_MAX];
 	guint32 ssrc[JANUS_STREAMING_STREAM_MAX];
-	GstCaps *caps;
 } janus_streaming_mountpoint;
 
