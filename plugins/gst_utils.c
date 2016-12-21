@@ -25,13 +25,28 @@ static void
 rtspsrc_pad_added_callback(GstElement * element, GstPad * pad, pipeline_callback_t * callback_data);
 
 
+static gboolean print_field (GQuark field, const GValue * value, gpointer pfx)
+{
+  gchar *str = gst_value_serialize (value);
+  
+  JANUS_LOG (LOG_VERB, "  %15s: %s\n" , g_quark_to_string (field), str);
+  g_free (str);
+  return TRUE;
+}
+
 gboolean on_eos(GstBus *bus, GstMessage *message, gpointer data)
 {
 	JANUS_LOG(LOG_INFO, "Handling pipeline EOS event\n");
-	//gchar *id = (gchar *)data;
-	//janus_mutex_lock(&mountpoints_mutex);
-	//janus_streaming_mountpoint *mp = g_hash_table_lookup(mountpoints, id);
-	//janus_mutex_unlock(&mountpoints_mutex);
+
+    pipeline_callback_t * callback_data = (pipeline_callback_t*)data;
+
+    if (!callback_data) {
+        JANUS_LOG(LOG_ERR, "Callback data is NULL!");
+        return;
+    }
+
+    janus_streaming_send_destroy_request(callback_data->mountpoint->id, callback_data->handle);
+
 	return TRUE;
 }
 
@@ -47,14 +62,6 @@ gboolean on_error(GstBus *bus, GstMessage *message, gpointer data)
 	g_free(debug);
 	on_eos(bus, message, data);
 	return TRUE;
-}
-
-static gboolean print_field (GQuark field, const GValue * value, gpointer pfx) {
-  gchar *str = gst_value_serialize (value);
-  
-  g_print ("  %15s: %s\n" , g_quark_to_string (field), str);
-  g_free (str);
-  return TRUE;
 }
 
 GstElement * 
@@ -111,8 +118,8 @@ create_remote_rtcp_input(const gchar * media, GSocket *socket)
     return udpsrc;
 }
 
-static void sender_bin_add_media_pads_to_rtpbin(GstElement * bin, guint pad_id, const gchar * media) {
-
+static void sender_bin_add_media_pads_to_rtpbin(GstElement * bin, guint pad_id, const gchar * media)
+{
     GstElement * rtpbin;
     GstPad *rtpbin_send_rtp_sink_pad, *rtpbin_send_rtp_src_pad, *rtpbin_recv_rctp_sink_pad, *ghost_pad;
 
@@ -400,9 +407,11 @@ GstElement * create_rtsp_source_element(gpointer user_data, const pipeline_data_
   return source;
 }
 
+//todo: fill codecs params in the mountpoint
 GstElement *
 create_videotestsrc_bin (gpointer user_data, const pipeline_data_t * pipeline_data)
 {
+
   GstElement *bin, *source, *converter, *encoder, *payloader;
   GstPad *pad;
 
