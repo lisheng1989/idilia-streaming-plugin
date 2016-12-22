@@ -543,6 +543,7 @@ static gpointer transcode_handler(gpointer data) {
 
 #if 0
 		sleep(10);
+		JANUS_LOG(LOG_INFO, "Streaming: dumping dot file\n");
     	GST_DEBUG_BIN_TO_DOT_FILE(GST_BIN(pipeline), GST_DEBUG_GRAPH_SHOW_ALL, "pipeline_delayed");
 #endif
 
@@ -1440,8 +1441,9 @@ void janus_streaming_incoming_rtp(janus_plugin_session *handle, int video, char 
 
 void janus_streaming_incoming_rtcp(janus_plugin_session *handle, int video, char *buf, int len) {
 
-	if(handle == NULL || handle->stopped || g_atomic_int_get(&stopping) || !g_atomic_int_get(&initialized))
+	if (handle == NULL || handle->stopped || g_atomic_int_get(&stopping) || !g_atomic_int_get(&initialized)) {
 		return;
+	}
 
 	janus_streaming_session * session = (janus_streaming_session*)(handle->plugin_handle);
 
@@ -1459,7 +1461,7 @@ void janus_streaming_incoming_rtcp(janus_plugin_session *handle, int video, char
 
 	int stream_type = video ? JANUS_STREAMING_STREAM_VIDEO : JANUS_STREAMING_STREAM_AUDIO;
 
-	if (stream_type == JANUS_STREAMING_STREAM_VIDEO && janus_rtcp_has_pli(buf, len)) {
+	if (stream_type == JANUS_STREAMING_STREAM_VIDEO && ( janus_rtcp_has_pli(buf, len) || janus_rtcp_has_fir(buf, len))) {
 
 		GSocket * sock_rtcp_cli = mountpoint->socket[stream_type][JANUS_STREAMING_SOCKET_RTCP_RCV_CLI].socket;
 		guint32 new_ssrc = mountpoint->ssrc[stream_type];
@@ -1644,13 +1646,19 @@ static void *janus_streaming_handler(void *data) {
 				mp->codecs.video_pt, "");
 			g_strlcat(sdptemp, buffer, 2048);
 
+#if 0 //todo: check if we can make use of it
 			g_snprintf(buffer, 512,
 				"a=rtcp-fb:%d nack\r\n",
 				mp->codecs.video_pt);
 			g_strlcat(sdptemp, buffer, 2048);
-
+#endif
 			g_snprintf(buffer, 512,
 				"a=rtcp-fb:%d nack pli\r\n",
+				mp->codecs.video_pt);
+			g_strlcat(sdptemp, buffer, 2048);
+
+			g_snprintf(buffer, 512,
+				"a=rtcp-fb:%d ccm fir\r\n",
 				mp->codecs.video_pt);
 			g_strlcat(sdptemp, buffer, 2048);
 
@@ -1844,7 +1852,7 @@ static void janus_streaming_relay_rtp_packet(gpointer data, gpointer user_data) 
 		return;
 	}
 	if((!session->started || session->paused )) {
-		JANUS_LOG(LOG_VERB, "Streaming not started yet for this session...\n");
+		JANUS_LOG(LOG_INFO, "Streaming not started yet for this session...\n");
 		return;
 	}
 	else{
@@ -1880,10 +1888,13 @@ gboolean janus_streaming_send_rtp_src_received(GSocket *socket, GIOCondition con
 		packet.length = len;
 		packet.is_video = data->is_video;
 
+		int stream_type = packet.is_video ? JANUS_STREAMING_STREAM_VIDEO : JANUS_STREAMING_STREAM_AUDIO;
+
 		packet.timestamp = ntohl(packet.data->timestamp);
 		packet.seq_number = ntohs(packet.data->seq_number);
 
-		mountpoint->ssrc[JANUS_STREAMING_STREAM_VIDEO] = ntohl(packet.data->ssrc);
+		mountpoint->ssrc[stream_type] = ntohl(packet.data->ssrc);
+
 		if(mountpoint->active == FALSE)
 			mountpoint->active = TRUE;
 
