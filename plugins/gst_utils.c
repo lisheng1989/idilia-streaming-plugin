@@ -189,11 +189,10 @@ static void link_rtp_pad_to_sender_bin(GstElement * source, GstPad * input_pad, 
 {
 
     GstElement *udp_sink_bin = NULL, * sender_bin, *rtcp_src;
-    gchar *rtcp_sinkpad_name;
+    gchar * sinkpad_name, *srcpad_name, *rtcp_sinkpad_name;
     GstElement * pipeline = callback_data->pipeline;
     gint stream_type;
-    GstPad *rtcp_srcpad, *senderbin_rtcp_sinkpad, *rtp_bin_sink_pad;
-
+    GstPad * output_sinkpad, * senderbin_sinkpad, *senderbin_srcpad, *rtcp_srcpad, *senderbin_rtcp_sinkpad;
     g_assert(input_pad);
     g_assert(pipeline);
     g_assert(media);
@@ -221,27 +220,32 @@ static void link_rtp_pad_to_sender_bin(GstElement * source, GstPad * input_pad, 
 
     g_assert (gst_element_set_state (udp_sink_bin, GST_STATE_PLAYING) != GST_STATE_CHANGE_FAILURE);
 
+    sinkpad_name = g_strdup_printf("%s_sink", media);
+    srcpad_name = g_strdup_printf("%s_src", media);
     rtcp_sinkpad_name = g_strdup_printf("%s_rtcp_sink", media);
+	
+    senderbin_sinkpad = gst_element_get_static_pad (sender_bin, sinkpad_name);
+    g_assert(senderbin_sinkpad);
 
+    senderbin_srcpad = gst_element_get_static_pad (sender_bin, srcpad_name);
+    g_assert(senderbin_srcpad);
+
+    output_sinkpad = gst_element_get_static_pad (udp_sink_bin, "sink");	
+    g_assert(output_sinkpad);
+  
     senderbin_rtcp_sinkpad = gst_element_get_static_pad (sender_bin, rtcp_sinkpad_name);
     g_assert(senderbin_rtcp_sinkpad);
   
     rtcp_srcpad = gst_element_get_static_pad (rtcp_src, "src");
     g_assert(rtcp_srcpad);
 
+    g_assert (gst_pad_link (input_pad, senderbin_sinkpad) == GST_PAD_LINK_OK);
+    g_assert (gst_pad_link (senderbin_srcpad, output_sinkpad) == GST_PAD_LINK_OK);
     g_assert (gst_pad_link (rtcp_srcpad, senderbin_rtcp_sinkpad) == GST_PAD_LINK_OK);
 
-    gst_element_link_many (source, sender_bin, udp_sink_bin, NULL);	
-
-    rtp_bin_sink_pad = gst_element_get_static_pad (udp_sink_bin, "sink");
-    g_assert(rtp_bin_sink_pad);
-	gst_object_unref(rtp_bin_sink_pad);
-
-
+    g_free(sinkpad_name);
+    g_free(srcpad_name);
     g_free(rtcp_sinkpad_name);
-	gst_object_unref(senderbin_rtcp_sinkpad);
-	gst_object_unref(rtcp_srcpad);
-	gst_object_unref(sender_bin);
 
 	return;
 }
@@ -343,10 +347,14 @@ static void
 rtspsrc_rtpbin_on_new_ssrc (GstElement *rtpbin, guint session_id, guint ssrc, pipeline_callback_t * callback_data)
 {
 	GstElement  *session;
+
+	JANUS_LOG(LOG_VERB, "On new ssrc; session: %u, ssrc=%08X\n", session_id, ssrc);
+
 	g_signal_emit_by_name (rtpbin, "get-session", session_id, &session);
 	g_assert(session);
 	g_signal_connect(session, "on-timeout",  (GCallback) rtspsrc_rtpbin_on_timeout,  callback_data);
 	g_signal_connect(session, "on-bye-ssrc", (GCallback) rtspsrc_rtpbin_on_bye_ssrc, callback_data);
+
 	g_object_unref (session);
 	
 }
