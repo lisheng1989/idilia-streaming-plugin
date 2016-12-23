@@ -1610,7 +1610,7 @@ static void *janus_streaming_handler(void *data) {
 			//todo: move to new function
 			/* Add audio line */
 			g_snprintf(buffer, 512,
-				"m=audio 9 RTP/SAVPF %d\r\n"
+				"m=audio 1 RTP/SAVPF %d\r\n"
 				"c=IN IP4 1.1.1.1\r\n",
 				mp->codecs.audio_pt);
 			g_strlcat(sdptemp, buffer, 2048);
@@ -1630,7 +1630,7 @@ static void *janus_streaming_handler(void *data) {
 
 			/* Add video line */
 			g_snprintf(buffer, 512,
-				"m=video 9 RTP/SAVPF %d\r\n"
+				"m=video 1 RTP/SAVPF %d\r\n"
 				"c=IN IP4 1.1.1.1\r\n",
 				mp->codecs.video_pt);
 			g_strlcat(sdptemp, buffer, 2048);
