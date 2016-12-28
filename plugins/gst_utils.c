@@ -302,11 +302,13 @@ rtspsrc_pad_added_callback(GstElement * element, GstPad * pad, pipeline_callback
 				callback_data->mountpoint->codecs.isAudio = TRUE;	
 				callback_data->mountpoint->codecs.audio_rtpmap = g_strdup_printf ("%d %s/%d",payload, encoding_name,clock_rate);			 								
                 connect_output = TRUE;
+		    		JANUS_LOG (LOG_ERR, "\n ISSUE: audio media type: %s\n", callback_data->mountpoint->codecs.audio_rtpmap);
             } else if (!g_strcmp0 (media, "video")) {
 				callback_data->mountpoint->codecs.isVideo = TRUE;				
 				callback_data->mountpoint->codecs.video_pt = payload;
 				callback_data->mountpoint->codecs.video_rtpmap = g_strdup_printf ("%d %s/%d", payload, encoding_name,clock_rate);									
-                connect_output = TRUE;				
+                connect_output = TRUE;		
+		    		JANUS_LOG (LOG_ERR, "\n ISSUE: video media type: %s\n", callback_data->mountpoint->codecs.video_rtpmap);	
             } else {
                 JANUS_LOG (LOG_WARN, "Unknown media type: %s\n", media);
             }
